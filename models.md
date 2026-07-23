@@ -46,7 +46,9 @@ Input Video
 [Stage 13] Thumbnail Generation
     ↓
 Output Clips + Metadata
+
 ```
+
 
 ---
 
