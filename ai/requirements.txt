@@ -1,0 +1,11 @@
+faster-whisper
+stable-ts
+silero-vad
+opencv-python
+numpy
+scenedetect
+ffmpeg-python
+requests
+ollama
+ultralytics
+pyannote.audio
