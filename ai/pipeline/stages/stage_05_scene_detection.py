@@ -4,7 +4,7 @@ from media_utils import find_input_video
 from scenedetect import SceneManager, open_video
 from scenedetect.detectors import ContentDetector
 
-
+# scene detection
 def run(context):
     input_video = find_input_video(context["upload_dir"])
     metadata = json.loads(
