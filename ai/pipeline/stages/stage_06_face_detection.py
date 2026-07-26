@@ -114,6 +114,10 @@ def run(context):
                     )
                 persons = _all_persons(results[0], frame_width, frame_height)
                 person_count = len(persons)
+                primary_count = sum(
+                    1 for p in persons 
+                    if (p["bbox"][2] / frame_width) * (p["bbox"][3] / frame_height) >= 0.030
+                )
                 best = persons[0] if persons else None
                 if best is not None:
                     best.pop("score", None)
@@ -122,6 +126,7 @@ def run(context):
                         "time": round(frame_index / fps, 3),
                         "detector": "yolov8-person",
                         "personCount": person_count,
+                        "primaryPersonCount": primary_count,
                         **best,
                     })
                 else:
@@ -130,6 +135,7 @@ def run(context):
                         "time": round(frame_index / fps, 3),
                         "detector": "yolov8-person",
                         "personCount": 0,
+                        "primaryPersonCount": 0,
                     })
 
             frame_index += 1
