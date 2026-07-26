@@ -462,25 +462,55 @@ def _deterministic_highlights(
     return selected
 
 
-def _generate_viral_hook(clip_text: str, clip_index: int, settings: dict) -> str:
-    """
-    Generate a single, highly engaging, scroll-stopping title hook using local Ollama.
-    Falls back to a curated list of generic curiosity-inducing viral hooks if offline or errors.
-    """
-    base_url = settings.get("ollamaUrl", "http://localhost:11434").rstrip("/")
-    model = settings.get("ollamaModel", "llama3:8b")
+def _extract_dynamic_fallback_hook(clip_text: str, clip_index: int) -> str:
+    """Extract a unique, scroll-stopping hook directly from the clip's transcript text."""
+    if not clip_text or not clip_text.strip():
+        fallbacks = [
+            "This Changed Everything...",
+            "The Secret Most People Miss",
+            "Don't Make This Mistake!",
+            "Watch What Happens Next...",
+            "The Truth They Hid From You",
+        ]
+        return fallbacks[clip_index % len(fallbacks)]
+
+    sentences = [s.strip() for s in re.split(r"[.!?]", clip_text) if s.strip()]
     
-    fallback_hooks = [
+    # Priority 1: Look for question or strong statement sentences
+    for sentence in sentences:
+        words = sentence.split()
+        if 3 <= len(words) <= 9:
+            clean = re.sub(r"[^a-zA-Z0-9\s']", "", sentence).strip()
+            return clean.title() + "..."
+            
+    # Priority 2: Extract strong phrase from first sentence
+    if sentences:
+        words = sentences[0].split()
+        if len(words) > 8:
+            clean = " ".join(words[:7])
+            clean = re.sub(r"[^a-zA-Z0-9\s']", "", clean).strip()
+            return clean.title() + "..."
+        elif len(words) >= 3:
+            clean = re.sub(r"[^a-zA-Z0-9\s']", "", sentences[0]).strip()
+            return clean.title() + "..."
+
+    fallbacks = [
         "This Changed Everything...",
         "The Secret Most People Miss",
         "Don't Make This Mistake!",
         "Watch What Happens Next...",
-        "Nobody Expected This...",
-        "The Truth They Hid From You",
-        "This One Trick Works...",
-        "What They Won't Tell You",
     ]
-    fallback = fallback_hooks[clip_index % len(fallback_hooks)]
+    return fallbacks[clip_index % len(fallbacks)]
+
+
+def _generate_viral_hook(clip_text: str, clip_index: int, settings: dict) -> str:
+    """
+    Generate a single, highly engaging, scroll-stopping title hook using local Ollama.
+    Falls back to dynamic content-derived hook extraction if offline or errors.
+    """
+    fallback = _extract_dynamic_fallback_hook(clip_text, clip_index)
+    base_url = settings.get("ollamaUrl", "http://localhost:11434").rstrip("/")
+    model = settings.get("ollamaModel", "llama3:8b")
 
     if not clip_text or not clip_text.strip():
         return fallback
@@ -491,17 +521,14 @@ def _generate_viral_hook(clip_text: str, clip_index: int, settings: dict) -> str
             return fallback
 
         prompt = (
-            "You are an expert social media editor.\n"
-            "Given the following transcript of a video clip, generate a single, highly engaging, scroll-stopping title hook (3 to 8 words) that creates curiosity and makes people want to watch the video.\n\n"
-            "Examples of good hooks:\n"
-            "- \"Nobody Expected This...\"\n"
-            "- \"The Secret Most People Miss\"\n"
-            "- \"This Changed Everything\"\n"
-            "- \"Don't Make This Mistake\"\n"
-            "- \"Watch What Happens Next\"\n\n"
-            "Do not repeat the first spoken sentence of the transcript.\n"
-            "Return ONLY the hook text (plain text, no quotes, no explanation, no markdown, 8 words max).\n\n"
-            f"Transcript:\n\"{clip_text}\""
+            "You are a top-tier YouTube Shorts content editor.\n"
+            "Given the transcript of a video clip, craft a unique, punchy, curiosity-inducing video title hook (3 to 7 words).\n"
+            "The hook MUST be specifically tailored to the clip's topic and create immense curiosity.\n\n"
+            "Rules:\n"
+            "- Do NOT repeat the exact first sentence of the transcript.\n"
+            "- Do NOT use generic meta phrases like 'Here is a clip'.\n"
+            "- Return ONLY the hook text (plain text, no quotes, no markdown, 7 words max).\n\n"
+            f"Transcript:\n\"{clip_text[:400]}\""
         )
 
         res = requests.post(
@@ -520,7 +547,8 @@ def _generate_viral_hook(clip_text: str, clip_index: int, settings: dict) -> str
         if res.ok:
             hook = res.json().get("response", "").strip()
             hook = re.sub(r'^["\'`\-*]+|["\'`\-*]+$', '', hook).strip()
-            if len(hook.split()) <= 10 and len(hook) > 5:
+            word_count = len(hook.split())
+            if 3 <= word_count <= 8 and len(hook) > 5:
                 return hook
     except Exception:
         pass
