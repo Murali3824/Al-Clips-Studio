@@ -1,4 +1,6 @@
 {
+  "pipelineVersion": "2.4.0",
+  "schemaVersion": "1.1",
   "whisper": {
     "defaultModel": "medium",
     "computeType": "int8",
@@ -6,13 +8,31 @@
     "language": null
   },
   "crop": {
-    "smoothingWindow": 30,
+    "smoothingAlpha": 0.35,
     "targetRatio": "9:16",
-    "paddingPercent": 0.1
+    "shortsWidth": 1080,
+    "shortsHeight": 1920,
+    "primaryPersonAreaRatio": 0.03,
+    "multiPersonRatioThreshold": 0.25,
+    "faceConfidenceThreshold": 0.40
+  },
+  "render": {
+    "preset": "veryfast",
+    "crf": 23,
+    "audioCodec": "aac",
+    "videoCodec": "libx264",
+    "blurStrength": 25,
+    "musicVolumeDefault": 20
+  },
+  "branding": {
+    "channelName": "ClipForge World",
+    "brandHashtags": ["#clipforgeworld", "#clipforge"],
+    "maxHashtags": 16
   },
   "ollama": {
+    "baseUrl": "http://localhost:11434",
     "model": "llama3:8b",
-    "temperature": 0.3,
-    "maxRetries": 3
+    "temperature": 0.7,
+    "timeoutSeconds": 5.0
   }
 }
