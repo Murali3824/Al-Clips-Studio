@@ -81,9 +81,23 @@ def run(context):
     else:
         model_name_or_path = model_name
 
+    # Option 1: Scene-Aware ByteTrack
+    scene_cuts_path = context["temp_dir"] / "scene_cuts.json"
+    scenes = []
+    if scene_cuts_path.exists():
+        scene_cuts_data = json.loads(scene_cuts_path.read_text(encoding="utf-8"))
+        scenes = scene_cuts_data.get("scenes", [])
+
+    def _get_scene_index(frame_idx: int) -> int:
+        for s in scenes:
+            if s.get("startFrame", 0) <= frame_idx <= s.get("endFrame", 999999999):
+                return int(s.get("index", 0))
+        return 0
+
     model = _load_model(model_name_or_path)
     tracks_by_id: dict[int, list[dict]] = {}
     sampled_frames = 0
+    current_scene_idx = -1
 
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         results = model.track(
@@ -100,13 +114,26 @@ def run(context):
         for result_index, result in enumerate(results):
             sampled_frames += 1
             frame_index = result_index * frame_interval
+
+            # Scene-cut boundary detection & tracker reset
+            scene_idx = _get_scene_index(frame_index)
+            if scene_idx != current_scene_idx:
+                current_scene_idx = scene_idx
+                with contextlib.suppress(Exception):
+                    if hasattr(model, "predictor") and model.predictor and hasattr(model.predictor, "trackers"):
+                        if model.predictor.trackers and len(model.predictor.trackers) > 0:
+                            model.predictor.trackers[0].reset()
+
             if result.boxes is None or len(result.boxes) == 0:
                 continue
             for box in result.boxes:
                 detection = _box_to_detection(box, frame_index, fps)
                 if detection is None:
                     continue
-                tracks_by_id.setdefault(detection["trackId"], []).append(detection)
+                # Scope trackId to scene boundary to prevent cross-cut track ID merging
+                scoped_track_id = (scene_idx + 1) * 10000 + int(detection["trackId"])
+                detection["trackId"] = scoped_track_id
+                tracks_by_id.setdefault(scoped_track_id, []).append(detection)
 
     tracks = sorted(
         (
