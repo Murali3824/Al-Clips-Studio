@@ -64,7 +64,8 @@ def run(context):
             target_h=SHORTS_HEIGHT,
         )
 
-        layout_mode = plan.get("layoutMode", "full-crop") if plan else "full-crop"
+        layout_mode = plan.get("layoutMode", "auto") if plan else "auto"
+        resolved_layout = plan.get("resolvedLayout", "full-crop") if plan else "full-crop"
         clips.append({
             "id": highlight["id"],
             "path": str(clip_path),
@@ -79,6 +80,7 @@ def run(context):
             "height": SHORTS_HEIGHT,
             "aspectRatio": "9:16",
             "layoutMode": layout_mode,
+            "resolvedLayout": resolved_layout,
             "layoutSegments": layout_segments,
             "crop": crop_plans.get(highlight["id"]),
             "score": highlight["score"],
