@@ -3,7 +3,7 @@ import re
 from typing import Any
 
 from media_utils import run_command
-from hook_renderer import render_hook_overlay_png
+from hook_renderer import render_hook_overlay_png, resolve_hook_text, resolve_hook_enabled
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -888,12 +888,12 @@ def run(context):
         ass_text = _style_header(1080, 1920, clip_metadata={}, settings=settings)
 
         # Hook rendering via PIL for pixel-perfect 8px border radius & 12px padding
-        hook_enabled = settings.get("autoHook", True)
-        hook_text = clip.get("autoHookText", clip.get("hook", ""))
+        hook_enabled = resolve_hook_enabled({}, settings)
+        hook_text = resolve_hook_text({}, settings, clip)
         hook_png_path = context["temp_dir"] / f"hook_{clip['id']}.png"
         use_hook_png = False
 
-        if hook_enabled and hook_text and hook_text.strip():
+        if hook_enabled and hook_text:
             font_family = str(_get_hook_setting("Font", {}, settings, "Arial Black"))
             font_size = int(_get_hook_setting("FontSize", {}, settings, 76))
             text_color = str(_get_hook_setting("Color", {}, settings, "#ffffff"))
@@ -912,6 +912,7 @@ def run(context):
                 canvas_h=1920,
             )
             use_hook_png = hook_png_path.exists()
+            print(f"[AutoHook] Rendered initial Hook PNG for {clip['id']}: text='{hook_text}'", flush=True)
 
         # Caption chunks for ASS subtitles
         chunks = _chunk_words(clip_words, display_mode)
@@ -932,7 +933,12 @@ def run(context):
         ass_filter_path = str(ass_path).replace("\\", "/").replace(":", r"\:")
 
         if use_hook_png:
-            hook_dur = float(_get_hook_setting("Duration", {}, settings, 5.0))
+            dur_mode = str(_get_hook_setting("DurationMode", {}, settings, "custom"))
+            clip_dur = float(clip.get("duration", 5.0))
+            if dur_mode == "entire":
+                hook_dur = clip_dur
+            else:
+                hook_dur = float(_get_hook_setting("Duration", {}, settings, 5.0))
             fade_in_s = float(_get_hook_setting("FadeIn", {}, settings, 300)) / 1000.0
             fade_out_s = float(_get_hook_setting("FadeOut", {}, settings, 500)) / 1000.0
             st_out = max(0.0, hook_dur - fade_out_s)
@@ -943,28 +949,37 @@ def run(context):
                 f"[0:v][hook_overlay]overlay=0:0:enable='between(t,0,{hook_dur:.2f})',"
                 f"ass='{ass_filter_path}'[vout]"
             )
-            run_command([
+            cmd = [
                 "ffmpeg", "-y",
                 "-i", str(source),
+                "-loop", "1",
                 "-i", str(hook_png_path),
                 "-filter_complex", filter_complex,
                 "-map", "[vout]", "-map", "0:a?",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-c:a", "copy", "-movflags", "+faststart",
+                "-c:a", "copy", "-shortest", "-movflags", "+faststart",
                 str(captioned_path),
-            ])
+            ]
+            print(f"[AutoHook] Executing FFmpeg with -loop 1 PNG overlay:\n  {' '.join(cmd)}", flush=True)
+            run_command(cmd)
         else:
-            run_command([
+            cmd = [
                 "ffmpeg", "-y",
                 "-i", str(source),
                 "-vf", f"ass='{ass_filter_path}'",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                 "-c:a", "copy", "-movflags", "+faststart",
                 str(captioned_path),
-            ])
+            ]
+            print(f"[AutoHook] Executing FFmpeg (no Hook PNG):\n  {' '.join(cmd)}", flush=True)
+            run_command(cmd)
 
         updated_clips.append({
             **clip,
+            "autoHook": use_hook_png,
+            "autoHookText": hook_text if use_hook_png else clip.get("autoHookText", ""),
+            "layoutMode": clip.get("layoutMode", settings.get("layoutMode", "auto")),
+            "resolvedLayout": clip.get("resolvedLayout", clip.get("crop", {}).get("resolvedLayout", "full-crop")),
             "captionPath": str(ass_path),
             "captionedPath": str(captioned_path),
             "captionDisplayMode": display_mode,
