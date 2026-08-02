@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { PipelineEvent, PipelineStatus, StageProgress } from "../types/processing";
 
+// 20 Canonical Stages matching Python pipeline and Backend API in exact execution order
 const stageLabels: Record<string, string> = {
   stage_01_audio: "Audio extraction",
   stage_02_vad: "Voice activity detection",
@@ -10,7 +11,11 @@ const stageLabels: Record<string, string> = {
   stage_05_scene_detection: "Scene detection",
   stage_06_face_detection: "Face detection",
   stage_07_face_tracking: "Face tracking",
-  stage_08_smooth_crop: "Smooth crop",
+  stage_07_subject_identity: "Subject identity continuity",
+  stage_08_shot_selection: "Editorial shot selection",
+  stage_08b_anchor_stream: "Per-frame anchor stream",
+  stage_08c_camera_operator: "Spring-damped camera operator",
+  stage_08d_transition_planner: "Smooth editorial transitions",
   stage_09_cut_crop: "Video cut and crop",
   stage_10_captions: "Caption generation",
   stage_11_metadata: "Metadata generation",
@@ -20,7 +25,7 @@ const stageLabels: Record<string, string> = {
   stage_13_thumbnails: "Thumbnail generation"
 };
 
-const initialStages = Object.entries(stageLabels).map(([id, label]) => ({
+const initialStages: StageProgress[] = Object.entries(stageLabels).map(([id, label]) => ({
   id,
   label,
   percent: 0,
@@ -48,39 +53,83 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
   percent: 0,
   stages: initialStages,
   status: "idle",
+
   addLog: (message) =>
     set((state) => ({ logs: [...state.logs.slice(-80), message] })),
+
   applyEvent: (event) =>
     set((state) => {
       if (state.activeJobId && event.jobId && state.activeJobId !== event.jobId) {
         return state;
       }
-      const nextStatus =
+
+      const nextStatus: PipelineStatus =
         event.stage === "pipeline" && event.status === "complete"
           ? "complete"
-          : event.stage === "pipeline" && event.status === "started"
+          : event.stage === "pipeline" && (event.status === "started" || event.status === "running")
             ? "running"
-            : state.status;
+            : event.status === "failed"
+              ? "failed"
+              : state.status;
+
+      const targetIndex = state.stages.findIndex((s) => s.id === event.stage);
+
+      let updatedStages = state.stages;
+      if (targetIndex !== -1) {
+        updatedStages = state.stages.map((stage, idx) => {
+          // Finite State Machine Rule 1: Prerequisite stages prior to targetIndex MUST be completed
+          if (idx < targetIndex) {
+            return {
+              ...stage,
+              status: "complete" as const,
+              percent: 100
+            };
+          }
+
+          // Target stage event update
+          if (idx === targetIndex) {
+            if (event.status === "complete") {
+              return {
+                ...stage,
+                status: "complete" as const,
+                percent: 100
+              };
+            }
+            if (event.status === "started" || event.status === "running") {
+              return {
+                ...stage,
+                status: "running" as const,
+                percent: Math.max(stage.percent, event.percent ?? 0)
+              };
+            }
+            if (event.status === "failed") {
+              return {
+                ...stage,
+                status: "failed" as const,
+                percent: stage.percent
+              };
+            }
+          }
+
+          // Downstream stages remain pending unless already completed
+          return stage;
+        });
+      }
+
+      // Compute overall monotonic pipeline percentage
+      const completedCount = updatedStages.filter((s) => s.status === "complete").length;
+      const calculatedPercent = Math.floor((completedCount / updatedStages.length) * 100);
+      const newPercent = Math.max(state.percent, event.percent ?? calculatedPercent);
 
       return {
         activeJobId: event.jobId || state.activeJobId,
-        logs: [...state.logs.slice(-80), `${event.percent}% ${event.message}`],
-        percent: event.percent,
+        logs: [...state.logs.slice(-80), `${newPercent}% ${event.message}`],
+        percent: newPercent,
         status: nextStatus,
-        stages: state.stages.map((stage) =>
-          stage.id === event.stage
-            ? {
-                ...stage,
-                percent: event.percent,
-                status:
-                  event.status === "started"
-                    ? "running"
-                    : (event.status as StageProgress["status"])
-              }
-            : stage
-        )
+        stages: updatedStages
       };
     }),
+
   resetProcessing: (jobId) => {
     set({
       activeJobId: jobId,
@@ -90,7 +139,9 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
       status: "running"
     });
   },
+
   setStatus: (status) => set({ status }),
+
   clearProcessing: () => {
     set({
       activeJobId: null,
@@ -100,6 +151,7 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
       status: "idle"
     });
   },
+
   initProcessing: (jobId, status) => {
     set({
       activeJobId: jobId,
@@ -109,6 +161,7 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
       status
     });
   },
+
   restorePipelineProgress: (percent, stages, logs) => {
     set((state) => {
       const nextStages = state.stages.map((stage) => {
@@ -117,14 +170,27 @@ export const useProcessingStore = create<ProcessingState>((set) => ({
           return {
             ...stage,
             percent: matching.percent,
-            status: matching.status as StageProgress["status"]
+            status: (matching.status === "error" ? "failed" : matching.status) as StageProgress["status"]
           };
         }
         return stage;
       });
+
+      // Enforce state machine sequential integrity on restored state
+      const firstIncompleteIdx = nextStages.findIndex(
+        (s) => s.status === "running" || s.status === "pending" || s.status === "failed"
+      );
+
+      const guardedStages = nextStages.map((stage, idx) => {
+        if (firstIncompleteIdx !== -1 && idx < firstIncompleteIdx) {
+          return { ...stage, status: "complete" as const, percent: 100 };
+        }
+        return stage;
+      });
+
       return {
         percent,
-        stages: nextStages,
+        stages: guardedStages,
         logs
       };
     });
