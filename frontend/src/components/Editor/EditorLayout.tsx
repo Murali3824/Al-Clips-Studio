@@ -7,6 +7,7 @@ import { Button } from "../Common/Button";
 interface EditorLayoutProps {
   selectedClip: any;
   clipEdits: Record<string, any>;
+  dirtyFields?: Record<string, boolean>;
   editorTab: any;
   setEditorTab: (tab: any) => void;
   updateClipEdit: (clipId: string, edits: any) => void;
@@ -36,6 +37,7 @@ const FONT_PRESETS: Record<string, { fontFamily: string; fontWeight: "normal" | 
 export const EditorLayout: React.FC<EditorLayoutProps> = ({
   selectedClip,
   clipEdits,
+  dirtyFields = {},
   editorTab,
   setEditorTab,
   updateClipEdit,
@@ -196,27 +198,55 @@ export const EditorLayout: React.FC<EditorLayoutProps> = ({
 
   const tabs = ["general", "captions", "hook", "layout", "music", "meme", "export"] as const;
 
+  const tabFields: Record<string, string[]> = {
+    general: ["title", "description", "tags", "platformRecommendation"],
+    captions: [
+      "captionStyle", "captionFontPreset", "captionContainerType", "captionAnimationType",
+      "highlightColorMode", "captionMultiColors", "captionPosition", "captionCustomMarginV",
+      "captionDisplayMode", "captionFontFamily", "captionFontWeight", "captionFontSize",
+      "captionLetterSpacing", "captionLineHeight", "captionPadding", "captionBorderRadius",
+      "captionOutlineSize", "captionShadowSize", "captionOpacity", "captionTextColor",
+      "captionHighlightColor", "captionBgColor", "captionOutlineColor", "captionShadowColor"
+    ],
+    hook: [
+      "autoHook", "autoHookText", "autoHookFont", "autoHookFontSize", "autoHookColor",
+      "autoHookBgColor", "autoHookPosition", "autoHookDurationMode", "autoHookDuration",
+      "autoHookFadeIn", "autoHookFadeOut"
+    ],
+    layout: ["layoutMode", "blurStrength"],
+    music: ["backgroundMusic", "musicVolume", "musicTrack"],
+    meme: ["memePath"],
+    export: ["frameAspect"]
+  };
+
   return (
     <div className="bg-white">
       {/* Tab Navigation — underline style */}
       <div className="flex gap-0 overflow-x-auto border-b border-gray-100 px-6 select-none">
-        {tabs.map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            className={`flex-shrink-0 px-4 py-3 text-sm font-medium capitalize transition-colors relative ${
-              editorTab === tab
-                ? "text-gray-950"
-                : "text-gray-400 hover:text-gray-700"
-            }`}
-            onClick={() => setEditorTab(tab)}
-          >
-            {tab === "meme" ? "Meme" : tab}
-            {editorTab === tab && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-gray-950 rounded-full" />
-            )}
-          </button>
-        ))}
+        {tabs.map((tab) => {
+          const fieldsForTab = tabFields[tab] || [];
+          const isTabDirty = fieldsForTab.some((f) => dirtyFields[f]);
+          return (
+            <button
+              key={tab}
+              type="button"
+              className={`flex-shrink-0 px-4 py-3 text-sm font-medium capitalize transition-colors relative flex items-center gap-1.5 ${
+                editorTab === tab
+                  ? "text-gray-950"
+                  : "text-gray-400 hover:text-gray-700"
+              }`}
+              onClick={() => setEditorTab(tab)}
+            >
+              <span>{tab === "meme" ? "Meme" : tab}</span>
+              {isTabDirty && (
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-600 flex-shrink-0" title="Modified" />
+              )}
+              {editorTab === tab && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-gray-950 rounded-full" />
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Tab Content */}
@@ -937,10 +967,9 @@ export const EditorLayout: React.FC<EditorLayoutProps> = ({
           <div className="space-y-5 animate-fade-in">
             <div>
               <label className="field-label mb-3">Export Aspect Ratio</label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 {[
                   { id: "9:16", label: "Vertical", desc: "9:16 portrait" },
-                  { id: "1:1", label: "Square", desc: "1:1 social" },
                   { id: "16:9", label: "Landscape", desc: "16:9 widescreen" },
                 ].map((frame) => (
                   <button
