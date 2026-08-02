@@ -44,6 +44,14 @@ def _center_crop(
         # Align facial eye-line anchor to 35% from top of crop window
         target_top = center_y - (eyeline_pct * crop_height)
         y = int(round(target_top))
+
+        # Headroom Integrity Protection:
+        # Guarantee crop top y never cuts below top of head/hair.
+        # Top of head is ~18% crop_height above eye_y. Safe y top preserves at least 4% headroom.
+        head_top_est = max(0.0, center_y - crop_height * 0.18)
+        safe_max_y = max(0, int(round(head_top_est - height * 0.04)))
+        if y > safe_max_y:
+            y = safe_max_y
     else:
         y = int(round((height - crop_height) / 2.0))
 
@@ -75,6 +83,145 @@ def _is_meaningfully_visible(bbox: list[float] | None, frame_w: int, frame_h: in
         return False
 
     return True
+
+
+# Shot type → renderer layout mode mapping.
+# This mapping is the ONLY place where editorial intent meets rendering strategy.
+# close  → full-crop: tight subject-centered crop for single speaker
+# wide   → blur-pad:  preserve both participants in letterboxed frame
+# medium → full-crop: center framing with minimal zoom for content readability
+SHOT_TYPE_TO_LAYOUT = {
+    "close": "full-crop",
+    "wide": "blur-pad",
+    "medium": "full-crop",
+}
+
+
+def _layout_from_shot_plan(
+    shot_plan_clips: list[dict],
+    clip_id: str,
+    clip_start: float,
+    clip_end: float,
+) -> list[dict]:
+    """Convert editorial shot plan segments into renderer layout segments.
+
+    Reads the upstream shot_plan.json output and maps each editorial shot type
+    to a renderer-specific layout mode using SHOT_TYPE_TO_LAYOUT.
+    """
+    clip_plan = next(
+        (c for c in shot_plan_clips if c.get("clipId") == clip_id),
+        None,
+    )
+
+    if clip_plan is None:
+        # Fallback: no shot plan available for this clip
+        return [{"start": clip_start, "end": clip_end, "layout": "full-crop"}]
+
+    segments = clip_plan.get("segments", [])
+    if not segments:
+        return [{"start": clip_start, "end": clip_end, "layout": "full-crop"}]
+
+    layout_segments = []
+    for seg in segments:
+        shot_type = seg.get("shotType", "close")
+        layout = SHOT_TYPE_TO_LAYOUT.get(shot_type, "full-crop")
+        layout_segments.append({
+            "start": round(float(seg["start"]), 3),
+            "end": round(float(seg["end"]), 3),
+            "layout": layout,
+            "shotType": shot_type,
+            "composition": seg.get("composition", "unknown"),
+        })
+
+    # Merge adjacent segments with identical layout
+    merged = []
+    for seg in layout_segments:
+        if merged and merged[-1]["layout"] == seg["layout"]:
+            merged[-1]["end"] = seg["end"]
+        else:
+            merged.append(seg)
+
+    if merged:
+        merged[0]["start"] = round(clip_start, 3)
+        merged[-1]["end"] = round(clip_end, 3)
+    else:
+        merged = [{"start": clip_start, "end": clip_end, "layout": "full-crop"}]
+
+    return merged
+
+
+def _build_layout_segments(
+    face_detections: list[dict],
+    clip_start: float,
+    clip_end: float,
+    scenes: list[dict],
+    frame_w: int = 1920,
+    frame_h: int = 1080,
+) -> list[dict]:
+    """
+    Complete Production Layout Decision Matrix.
+    Maps subject configurations to explicit layout modes (full-crop vs blur-pad) aligned to scene boundaries.
+    """
+    if not scenes:
+        scenes = [{"start": clip_start, "end": clip_end}]
+
+    raw_segments = []
+
+    for scene in scenes:
+        s_start = max(clip_start, float(scene.get("start", 0)))
+        s_end = min(clip_end, float(scene.get("end", clip_end)))
+
+        if s_start >= s_end - 0.05:
+            continue
+
+        scene_dets = [
+            d for d in face_detections
+            if s_start <= float(d.get("time", 0)) <= s_end
+        ]
+
+        if not scene_dets:
+            layout = "full-crop"
+        else:
+            meaningful_multi = 0
+            for d in scene_dets:
+                bbox = d.get("bbox")
+                person_count = int(d.get("primaryPersonCount", d.get("personCount", 1)))
+                if person_count >= 2 and _is_meaningfully_visible(bbox, frame_w, frame_h):
+                    meaningful_multi += 1
+
+            if len(scene_dets) >= 2:
+                has_multi = (meaningful_multi / len(scene_dets)) >= 0.35
+            else:
+                has_multi = meaningful_multi >= 1
+
+            layout = "blur-pad" if has_multi else "full-crop"
+
+        raw_segments.append({
+            "start": round(s_start, 3),
+            "end": round(s_end, 3),
+            "layout": layout
+        })
+
+    raw_segments.sort(key=lambda s: s["start"])
+
+    # Merge adjacent segments with identical layout
+    merged = []
+    for seg in raw_segments:
+        if not merged:
+            merged.append(seg)
+        else:
+            if seg["layout"] == merged[-1]["layout"]:
+                merged[-1]["end"] = seg["end"]
+            else:
+                merged.append(seg)
+
+    if merged:
+        merged[0]["start"] = round(clip_start, 3)
+        merged[-1]["end"] = round(clip_end, 3)
+    else:
+        merged = [{"start": clip_start, "end": clip_end, "layout": "full-crop"}]
+
+    return merged
 
 
 def _detections_in_range(track: dict, start: float, end: float) -> list[dict]:
@@ -183,80 +330,6 @@ def _calculate_crop_quality_score(
     return round(max(0.0, min(1.0, score)), 3)
 
 
-def _build_layout_segments(
-    face_detections: list[dict],
-    clip_start: float,
-    clip_end: float,
-    scenes: list[dict],
-    frame_w: int = 1920,
-    frame_h: int = 1080,
-) -> list[dict]:
-    """
-    Complete Production Layout Decision Matrix.
-    Maps subject configurations to explicit layout modes (full-crop vs blur-pad) aligned to scene boundaries.
-    """
-    if not scenes:
-        scenes = [{"start": clip_start, "end": clip_end}]
-
-    raw_segments = []
-
-    for scene in scenes:
-        s_start = max(clip_start, float(scene.get("start", 0)))
-        s_end = min(clip_end, float(scene.get("end", clip_end)))
-
-        if s_start >= s_end - 0.05:
-            continue
-
-        scene_dets = [
-            d for d in face_detections
-            if s_start <= float(d.get("time", 0)) <= s_end
-        ]
-
-        if not scene_dets:
-            layout = "full-crop"
-        else:
-            meaningful_multi = 0
-            for d in scene_dets:
-                bbox = d.get("bbox")
-                person_count = int(d.get("primaryPersonCount", d.get("personCount", 1)))
-                if person_count >= 2 and _is_meaningfully_visible(bbox, frame_w, frame_h):
-                    meaningful_multi += 1
-
-            if len(scene_dets) >= 2:
-                has_multi = (meaningful_multi / len(scene_dets)) >= 0.35
-            else:
-                has_multi = meaningful_multi >= 1
-
-            layout = "blur-pad" if has_multi else "full-crop"
-
-        raw_segments.append({
-            "start": round(s_start, 3),
-            "end": round(s_end, 3),
-            "layout": layout
-        })
-
-    raw_segments.sort(key=lambda s: s["start"])
-
-    # Merge adjacent segments with identical layout
-    merged = []
-    for seg in raw_segments:
-        if not merged:
-            merged.append(seg)
-        else:
-            if seg["layout"] == merged[-1]["layout"]:
-                merged[-1]["end"] = seg["end"]
-            else:
-                merged.append(seg)
-
-    if merged:
-        merged[0]["start"] = round(clip_start, 3)
-        merged[-1]["end"] = round(clip_end, 3)
-    else:
-        merged = [{"start": clip_start, "end": clip_end, "layout": "full-crop"}]
-
-    return merged
-
-
 def _validate_and_adjust_crop(
     crop: dict,
     width: int,
@@ -318,6 +391,8 @@ def _measure_composition(
     height: int,
     detections: list[dict],
     clip_duration: float,
+    face_anchors: list[dict] | None = None,
+    face_expected_samples: int | None = None,
     sample_interval_seconds: float = 0.5,
 ) -> dict:
     """Measure the current static plan without changing its framing policy.
@@ -378,10 +453,55 @@ def _measure_composition(
     if minimum_side_margin is not None and minimum_side_margin < 0.15:
         reasons.append("selected_subject_near_horizontal_edge")
 
+    face_anchors = face_anchors or []
+    face_containment = []
+    face_side_margins = []
+    face_top_margins = []
+    face_bottom_margins = []
+    for face in face_anchors:
+        left, top, box_w, box_h = (float(value) for value in face["bbox"][:4])
+        face_area = max(1.0, box_w * box_h)
+        face_containment.append(_intersection_area(left, top, box_w, box_h, crop) / face_area)
+        center_x = left + box_w / 2.0
+        face_side_margins.append(min(center_x - c_x, (c_x + c_w) - center_x) / max(c_w, 1.0))
+        face_top_margins.append((top - c_y) / max(c_h, 1.0))
+        face_bottom_margins.append(((c_y + c_h) - (top + box_h)) / max(c_h, 1.0))
+    expected_face_samples = (
+        max(1, int(math.ceil(max(0.0, clip_duration) / sample_interval_seconds)) + 1)
+        if face_expected_samples is None
+        else max(1, int(face_expected_samples))
+    )
+    face_coverage = min(1.0, len(face_anchors) / expected_face_samples)
+    face_min_containment = min(face_containment) if face_containment else None
+    face_min_side_margin = min(face_side_margins) if face_side_margins else None
+    face_min_top_margin = min(face_top_margins) if face_top_margins else None
+    face_min_bottom_margin = min(face_bottom_margins) if face_bottom_margins else None
+    face_measured = bool(face_anchors)
+    if face_measured:
+        if face_coverage < 0.50:
+            reasons.append("face_missing_for_most_of_clip")
+        if face_min_containment is not None and face_min_containment < 0.98:
+            reasons.append("face_materially_clipped")
+        if face_min_side_margin is not None and face_min_side_margin < 0.15:
+            reasons.append("face_near_horizontal_edge")
+        if face_min_top_margin is not None and face_min_top_margin < 0.06:
+            reasons.append("forehead_headroom_unsafe")
+        if face_min_bottom_margin is not None and face_min_bottom_margin < 0.10:
+            reasons.append("chin_clearance_unsafe")
+
     hard_failure = (
         not source_bounds_valid
-        or sample_coverage < 0.50
-        or (minimum_containment is not None and minimum_containment < 0.70)
+        or (face_measured and (
+            face_coverage < 0.50
+            or (face_min_containment is not None and face_min_containment < 0.98)
+            or (face_min_side_margin is not None and face_min_side_margin < 0.15)
+            or (face_min_top_margin is not None and face_min_top_margin < 0.06)
+            or (face_min_bottom_margin is not None and face_min_bottom_margin < 0.10)
+        ))
+        or (not face_measured and (
+            sample_coverage < 0.50
+            or (minimum_containment is not None and minimum_containment < 0.70)
+        ))
     )
     warning = bool(reasons) and not hard_failure
     status = "fail" if hard_failure else "warning" if warning else "pass"
@@ -405,7 +525,12 @@ def _measure_composition(
         "selectedSubjectAverageContainment": round(average_containment, 3) if average_containment is not None else None,
         "selectedSubjectMinimumHorizontalMargin": round(minimum_side_margin, 3) if minimum_side_margin is not None else None,
         "selectedSubjectMedianBodyCoverage": round(median_body_coverage, 3) if median_body_coverage is not None else None,
-        "faceValidation": "unavailable_person_boxes_only",
+        "faceValidation": "measured_identity_faces" if face_measured else "unavailable_person_boxes_only",
+        "faceSampleCoverage": round(face_coverage, 3) if face_measured else None,
+        "faceMinimumContainment": round(face_min_containment, 3) if face_min_containment is not None else None,
+        "faceMinimumHorizontalMargin": round(face_min_side_margin, 3) if face_min_side_margin is not None else None,
+        "faceMinimumTopMargin": round(face_min_top_margin, 3) if face_min_top_margin is not None else None,
+        "faceMinimumBottomMargin": round(face_min_bottom_margin, 3) if face_min_bottom_margin is not None else None,
     }
 
 
@@ -420,14 +545,120 @@ def _resolve_fit_guard(composition: dict) -> tuple[bool, list[str]]:
         "crop_outside_source_bounds",
         "no_selected_subject_detections",
         "selected_subject_missing_for_most_of_clip",
-        "selected_subject_materially_clipped",
+        "face_missing_for_most_of_clip",
+        "face_materially_clipped",
+        "face_near_horizontal_edge",
+        "forehead_headroom_unsafe",
+        "chin_clearance_unsafe",
     }
+    if composition.get("faceValidation") != "measured_identity_faces":
+        force_blur_reasons.add("selected_subject_materially_clipped")
     reasons = [
         reason
         for reason in composition.get("reasons", [])
         if reason in force_blur_reasons
     ]
     return bool(reasons), reasons
+
+
+def _active_identity_faces(identity_data: dict | None, clip_start: float, clip_end: float) -> tuple[list[dict], list[dict]]:
+    """Return only face samples belonging to each scene's approved active identity."""
+    if not identity_data:
+        return [], []
+    anchors = []
+    selections = []
+    for scene in identity_data.get("scenes", []):
+        scene_start = max(clip_start, float(scene.get("start", clip_start)))
+        scene_end = min(clip_end, float(scene.get("end", clip_end)))
+        if scene_end <= scene_start:
+            continue
+        switches = sorted(scene.get("subjectSwitches", []), key=lambda item: float(item.get("time", 0.0)))
+        for index, switch in enumerate(switches):
+            subject_id = switch.get("toSubjectId")
+            if not subject_id:
+                continue
+            segment_start = max(scene_start, float(switch["time"]))
+            segment_end = min(scene_end, float(switches[index + 1]["time"]) if index + 1 < len(switches) else scene_end)
+            if segment_end < segment_start:
+                continue
+            identity = next((item for item in scene.get("identities", []) if item.get("subjectId") == subject_id), None)
+            if identity is None:
+                continue
+            accepted = 0
+            for detection in identity.get("detections", []):
+                timestamp = float(detection.get("time", -1))
+                if segment_start <= timestamp <= segment_end:
+                    anchors.append({**detection, "subjectId": subject_id, "sceneIndex": scene.get("sceneIndex")})
+                    accepted += 1
+            selections.append({
+                "sceneIndex": scene.get("sceneIndex"), "subjectId": subject_id,
+                "start": round(segment_start, 3), "end": round(segment_end, 3),
+                "reason": switch.get("reason"), "faceSampleCount": accepted,
+            })
+    return anchors, selections
+
+
+def _weighted_face_anchor(face_anchors: list[dict]) -> tuple[float | None, float | None, float]:
+    if not face_anchors:
+        return None, None, 0.0
+    weights = [max(0.01, float(face.get("confidence") or 0.0) * float(face["bbox"][2]) * float(face["bbox"][3])) for face in face_anchors]
+    total = sum(weights)
+    center_x = sum((float(face["bbox"][0]) + float(face["bbox"][2]) / 2.0) * weight for face, weight in zip(face_anchors, weights)) / total
+    eye_y = sum((float(face["bbox"][1]) + float(face["bbox"][3]) * 0.42) * weight for face, weight in zip(face_anchors, weights)) / total
+    confidence = statistics.fmean(float(face.get("confidence") or 0.0) for face in face_anchors)
+    return center_x, eye_y, confidence
+
+
+def _identity_faces_for_track(identity_faces: list[dict], track_detections: list[dict]) -> list[dict]:
+    """Keep only approved active faces that belong to the selected person track."""
+    associated = []
+    for face in identity_faces:
+        timestamp = float(face.get("time", -999.0))
+        person = min(track_detections, key=lambda item: abs(float(item.get("time", -999.0)) - timestamp), default=None)
+        if person is None or abs(float(person.get("time", -999.0)) - timestamp) > 0.26:
+            continue
+        px, py, pw, ph = (float(value) for value in person.get("bbox", [])[:4])
+        fx, fy, fw, fh = (float(value) for value in face.get("bbox", [])[:4])
+        center_x, center_y = fx + fw / 2.0, fy + fh / 2.0
+        if px - pw * 0.10 <= center_x <= px + pw * 1.10 and py - ph * 0.10 <= center_y <= py + ph * 1.10:
+            associated.append(face)
+    return associated
+
+
+def _identity_safe_layout_segments(
+    base_segments: list[dict],
+    scenes: list[dict],
+    clip_start: float,
+    clip_end: float,
+    approved_faces: list[dict],
+) -> list[dict]:
+    """Use the existing blur-pad mode where the static crop lacks its approved identity."""
+    safe_segments = []
+    for scene in scenes or [{"start": clip_start, "end": clip_end}]:
+        start = max(clip_start, float(scene.get("start", clip_start)))
+        end = min(clip_end, float(scene.get("end", clip_end)))
+        if end <= start + 0.05:
+            continue
+        midpoint = (start + end) / 2.0
+        base_layout = next(
+            (segment["layout"] for segment in base_segments if float(segment["start"]) <= midpoint <= float(segment["end"])),
+            "blur-pad",
+        )
+        has_approved_face = any(start <= float(face.get("time", -1)) <= end for face in approved_faces)
+        safe_segments.append({
+            "start": round(start, 3), "end": round(end, 3),
+            "layout": "full-crop" if has_approved_face and base_layout != "blur-pad" else "blur-pad",
+        })
+    merged = []
+    for segment in safe_segments:
+        if merged and merged[-1]["layout"] == segment["layout"]:
+            merged[-1]["end"] = segment["end"]
+        else:
+            merged.append(segment)
+    if merged:
+        merged[0]["start"] = round(clip_start, 3)
+        merged[-1]["end"] = round(clip_end, 3)
+    return merged or [{"start": clip_start, "end": clip_end, "layout": "blur-pad"}]
 
 
 def _select_visible_subject_for_scene(
@@ -552,6 +783,16 @@ def run(context):
     scenes = []
     if scene_cuts_path.exists():
         scenes = json.loads(scene_cuts_path.read_text(encoding="utf-8")).get("scenes", [])
+    identity_path = context["temp_dir"] / "subject_identities.json"
+    identity_data = json.loads(identity_path.read_text(encoding="utf-8")) if identity_path.exists() else None
+
+    # Load upstream editorial shot plan (produced by stage_08_shot_selection)
+    shot_plan_path = context["temp_dir"] / "shot_plan.json"
+    shot_plan_clips = []
+    if shot_plan_path.exists():
+        shot_plan_clips = json.loads(
+            shot_plan_path.read_text(encoding="utf-8")
+        ).get("clips", [])
 
     width = int(metadata["width"])
     height = int(metadata["height"])
@@ -569,7 +810,13 @@ def run(context):
         scene_subjects = _scene_subject_selections(
             tracks, scenes, start, end, width, height
         )
-        target_x, target_y, landmark_conf = _weighted_center_anchors(detections, width, height)
+        active_identity_faces, identity_selections = _active_identity_faces(identity_data, start, end)
+        identity_faces = _identity_faces_for_track(active_identity_faces, detections)
+        face_x, face_y, face_confidence = _weighted_face_anchor(identity_faces)
+        person_x, person_y, person_confidence = _weighted_center_anchors(detections, width, height)
+        target_x = face_x if face_x is not None else person_x
+        target_y = face_y if face_y is not None else person_y
+        landmark_conf = face_confidence if face_x is not None else person_confidence
 
         # FORENSIC FIX: Initialize camera coordinates per highlight clip to eliminate state pollution dragging!
         cam_x = target_x if target_x is not None else width / 2.0
@@ -579,9 +826,15 @@ def run(context):
         # score- or duration-driven zoom before composition is measured.
         target_scale = 1.0
 
-        # Build layout segments
-        if layout_setting == "auto":
+        # Build layout segments from upstream editorial shot plan
+        has_shot_plan = bool(shot_plan_clips)
+        if layout_setting == "auto" and has_shot_plan:
+            layout_segments = _layout_from_shot_plan(shot_plan_clips, highlight.get("id") or highlight.get("clipId") or highlight.get("clip_id", ""), start, end)
+        elif layout_setting == "auto" and identity_data is not None:
             layout_segments = _build_layout_segments(all_detections, start, end, scenes, frame_w=width, frame_h=height)
+            layout_segments = _identity_safe_layout_segments(
+                layout_segments, scenes, start, end, identity_faces
+            )
         elif layout_setting == "blur-pad":
             layout_segments = [{"start": start, "end": end, "layout": "blur-pad"}]
         else:
@@ -589,13 +842,28 @@ def run(context):
 
         raw_crop = _center_crop(width, height, center_x=cam_x, center_y=cam_y, scale=target_scale, eyeline_pct=0.35)
         crop = _validate_and_adjust_crop(raw_crop, width, height, center_x=cam_x)
-        composition = _measure_composition(crop, width, height, detections, duration)
+        composition = _measure_composition(crop, width, height, detections, duration, identity_faces, len(detections))
         use_blur_pad, fit_guard_reasons = _resolve_fit_guard(composition)
-        if use_blur_pad:
-            layout_segments = [{"start": start, "end": end, "layout": "blur-pad"}]
+
+        # ARCHITECTURAL PRINCIPLE: Downstream stages MUST respect upstream editorial authority.
+        # Downstream override to blur-pad is permitted ONLY if producing the requested crop is
+        # mathematically impossible or creates an invalid render (crop_outside_source_bounds).
+        # Heuristic reasons (missing face anchors, sparse samples, edge proximity) are prohibited
+        # from overriding approved shot decisions.
+        if has_shot_plan:
+            physical_impossibility = not composition.get("sourceBoundsValid", True) or "crop_outside_source_bounds" in fit_guard_reasons
+            if physical_impossibility:
+                layout_segments = [{"start": start, "end": end, "layout": "blur-pad"}]
+                fit_guard_override = True
+            else:
+                fit_guard_override = False
+        else:
+            fit_guard_override = use_blur_pad
+            if fit_guard_override:
+                layout_segments = [{"start": start, "end": end, "layout": "blur-pad"}]
 
         dominant_layout = layout_segments[0]["layout"] if len(layout_segments) == 1 else "auto-dynamic"
-        method = "production-yolo-bytetrack-head-anchor" if target_x is not None else "safe-center-fallback"
+        method = "production-identity-face-anchor" if face_x is not None else ("production-yolo-bytetrack-head-anchor" if target_x is not None else "safe-center-fallback")
 
         diagnostics = {
             "layoutReason": (
@@ -604,6 +872,10 @@ def run(context):
                 else f"Production Layout Matrix ({dominant_layout})"
             ),
             "faceDetectionsUsed": len(detections),
+            "identityFaceAnchorsUsed": len(identity_faces),
+            "activeIdentityFaceSamples": len(active_identity_faces),
+            "activeIdentityFaceSamples": len(active_identity_faces),
+            "identitySubjectSelections": identity_selections,
             "trackingMethod": method,
             "sceneSubjectSelections": scene_subjects,
             "landmarkConfidence": round(landmark_conf, 2),
@@ -612,14 +884,14 @@ def run(context):
             "fitGuard": {
                 "enabled": True,
                 "neutralScale": target_scale,
-                "usedBlurPad": use_blur_pad,
+                "usedBlurPad": fit_guard_override,
                 "reasons": fit_guard_reasons,
             },
             "zoomScale": target_scale,
         }
 
         crop_plans.append({
-            "clipId": highlight["id"],
+            "clipId": highlight.get("id") or highlight.get("clipId") or highlight.get("clip_id", ""),
             "start": start,
             "end": end,
             "method": method,
@@ -635,6 +907,8 @@ def run(context):
             "trackId": track.get("trackId") if track else None,
             "sceneSubjectSelections": scene_subjects,
             "faceDetectionsUsed": len(detections),
+            "identityFaceAnchorsUsed": len(identity_faces),
+            "identitySubjectSelections": identity_selections,
             "detectedCenterX": round(target_x, 3) if target_x is not None else None,
             "detectedCenterY": round(target_y, 3) if target_y is not None else None,
             "smoothedCenterX": round(cam_x, 3) if cam_x is not None else None,
