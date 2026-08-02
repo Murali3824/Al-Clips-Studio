@@ -1,94 +1,71 @@
 import json
 from pathlib import Path
-
 import sys
+
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from metadata_engine import (
     CHANNEL_NAME,
     clean_text,
-    extract_keywords,
-    detect_niche,
-    generate_title,
-    generate_description,
-    generate_hashtags,
+    generate_with_quality_review,
 )
 
-PLATFORM_RULES = [
-    ("TikTok", {"quick", "simple", "trend", "secret", "mistake", "stop", "start"}),
-    ("Instagram Reels", {"creator", "story", "visual", "brand", "moment", "share"}),
-    ("YouTube Shorts", {"how", "why", "learn", "important", "remember", "method"}),
-]
-
-
-def _platform(keywords: list[str], duration: float) -> str:
-    keyword_set = set(keywords)
-    scores = {
-        platform: len(keyword_set & platform_keywords)
-        for platform, platform_keywords in PLATFORM_RULES
-    }
-    if duration <= 20:
-        scores["TikTok"] += 1
-        scores["Instagram Reels"] += 1
-    else:
-        scores["YouTube Shorts"] += 1
-    return max(scores, key=scores.get)
-
-
-def _posting_time(platform: str) -> str:
-    if platform == "TikTok":
-        return "Weekday evening, 6 PM - 9 PM"
-    if platform == "Instagram Reels":
-        return "Weekday lunch or evening, 12 PM - 2 PM or 6 PM - 8 PM"
-    return "Weekday afternoon, 2 PM - 5 PM"
-
-
 def run(context):
-    print("Generating metadata...", flush=True)
+    print("Generating production-grade metadata with 2-pass quality review...", flush=True)
     metadata_dir = context["output_dir"] / "metadata"
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
-    highlights = json.loads(
-        (context["temp_dir"] / "highlights.json").read_text(encoding="utf-8")
-    )["highlights"]
+    highlights_file = context["temp_dir"] / "highlights.json"
+    if not highlights_file.exists():
+        highlights_file = context["output_dir"] / "highlights.json"
+
+    highlights = json.loads(highlights_file.read_text(encoding="utf-8"))["highlights"]
 
     for highlight in highlights:
         text = clean_text(highlight.get("text") or highlight.get("hook") or "")
         if not text:
-            raise RuntimeError(f"No transcript text available for {highlight['id']}")
+            continue
 
-        start = float(highlight["start"])
-        end = float(highlight["end"])
-        duration = float(highlight.get("duration") or end - start)
-        keywords = extract_keywords(text)
-        niche = detect_niche(keywords)
-        platform = _platform(keywords, duration)
-        tags = generate_hashtags(keywords, niche)
+        start = float(highlight.get("start", 0.0))
+        end = float(highlight.get("end", 0.0))
+        duration = float(highlight.get("duration") or max(0.5, end - start))
 
-        title = generate_title(text, keywords)
-        desc = generate_description(text, keywords, niche)
-
-        # AI Decision Confidence Score
-        confidence = 0.95 if len(keywords) >= 3 else 0.80
+        # Generate production metadata via 2-pass quality review engine
+        meta_res = generate_with_quality_review(highlight, context.get("settings", {}))
 
         metadata = {
-            "pipelineVersion": "2.4.0",
-            "schemaVersion": "1.1",
-            "title": title,
-            "description": desc,
-            "tags": tags,
+            "pipelineVersion": "2.5.0",
+            "schemaVersion": "1.2",
+            "title": meta_res["title"],
+            "hook": meta_res["hook"],
+            "autoHookText": meta_res["autoHookText"],
+            "description": meta_res["description"],
+            "tags": meta_res["tags"],
+            "categorizedHashtags": meta_res["categorizedHashtags"],
             "channel": CHANNEL_NAME,
-            "niche": niche,
-            "confidenceScore": confidence,
-            "platformRecommendation": platform,
-            "suggestedPostingTime": _posting_time(platform),
+            "niche": meta_res["category"],
+            "category": meta_res["category"],
+            "targetAudience": meta_res["targetAudience"],
+            "mood": meta_res["mood"],
+            "ctrPrediction": meta_res.get("ctrPrediction"),
+            "seoScore": meta_res.get("seoScore"),
+            "hookScore": meta_res.get("hookScore"),
+            "retentionScore": meta_res.get("retentionScore"),
+            "emotionalImpact": meta_res.get("emotionalImpact"),
+            "productionScore": meta_res.get("productionScore"),
+            "viralScore": meta_res.get("viralScore"),
+            "score": meta_res.get("score"),
+            "qualityScore": meta_res.get("qualityScore"),
+            "confidenceScore": meta_res.get("confidenceScore"),
+            "platformRecommendation": "YouTube Shorts",
+            "suggestedPostingTime": meta_res["bestPostingTime"],
             "sourceStart": start,
             "sourceEnd": end,
             "sourceDuration": duration,
-            "keywords": keywords,
+            "keywords": meta_res["keywords"],
             "diagnostics": {
-                "keywordCount": len(keywords),
-                "nicheClassification": niche,
+                "keywordCount": len(meta_res["keywords"]),
+                "qualityReviewPassed": meta_res["qualityScore"] >= 75,
                 "brandingIncluded": True,
             },
         }
@@ -99,12 +76,13 @@ def run(context):
         )
         (metadata_dir / f"{highlight['id']}.txt").write_text(
             "\n\n".join([
-                f"Title: {title}",
-                f"Description:\n{desc}",
-                f"Hashtags:\n{' '.join(tags)}",
+                f"Title: {meta_res['title']}",
+                f"Hook: {meta_res['hook']}",
+                f"Description:\n{meta_res['description']}",
+                f"Hashtags:\n{' '.join(meta_res['tags'])}",
                 f"Channel: {CHANNEL_NAME}",
-                f"Recommended Platform: {platform}",
-                f"Suggested Posting Time: {metadata['suggestedPostingTime']}",
+                f"Category: {meta_res['category']}",
+                f"Suggested Posting Time: {meta_res['bestPostingTime']}",
             ]) + "\n",
             encoding="utf-8",
         )
