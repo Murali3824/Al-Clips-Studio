@@ -1,3 +1,12 @@
+import sys
+import io
+
+# Force UTF-8 stream encoding on Windows to prevent charmap codec errors when printing unicode characters like '→'
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 import argparse
 import json
 import warnings
@@ -24,7 +33,11 @@ from stages.stage_04_highlights import run as run_highlights
 from stages.stage_05_scene_detection import run as run_scene_detection
 from stages.stage_06_face_detection import run as run_face_detection
 from stages.stage_07_face_tracking import run as run_face_tracking
-from stages.stage_08_smooth_crop import run as run_smooth_crop
+from stages.stage_07_subject_identity import run as run_subject_identity
+from stages.stage_08_shot_selection import run as run_shot_selection
+from stages.stage_08b_anchor_stream import run as run_anchor_stream
+from stages.stage_08c_camera_operator import run as run_camera_operator
+from stages.stage_08d_transition_planner import run as run_transition_planner
 from stages.stage_09_cut_crop import run as run_cut_crop
 from stages.stage_10_captions import run as run_captions
 from stages.stage_11_metadata import run as run_metadata
@@ -44,7 +57,11 @@ STAGES: list[Stage] = [
     ("stage_05_scene_detection", "Scene detection", run_scene_detection),
     ("stage_06_face_detection", "Face detection", run_face_detection),
     ("stage_07_face_tracking", "Face tracking", run_face_tracking),
-    ("stage_08_smooth_crop", "Smooth crop", run_smooth_crop),
+    ("stage_07_subject_identity", "Subject identity continuity", run_subject_identity),
+    ("stage_08_shot_selection", "Editorial shot selection", run_shot_selection),
+    ("stage_08b_anchor_stream", "Per-frame anchor stream", run_anchor_stream),
+    ("stage_08c_camera_operator", "Spring-damped camera operator", run_camera_operator),
+    ("stage_08d_transition_planner", "Smooth editorial transitions", run_transition_planner),
     ("stage_09_cut_crop", "Video cut and crop", run_cut_crop),
     ("stage_10_captions", "Caption generation", run_captions),
     ("stage_11_metadata", "Metadata generation", run_metadata),
