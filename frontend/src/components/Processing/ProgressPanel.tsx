@@ -23,7 +23,7 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
   setLogsOpen,
 }) => {
   return (
-    <div className="bg-white max-w-2xl mx-auto p-8 rounded-xl border border-gray-200">
+    <div className="bg-white max-w-2xl mx-auto p-8 rounded-xl border border-gray-200 shadow-sm">
       {/* Top Section */}
       <div className="flex items-start justify-between">
         <div>
@@ -54,14 +54,15 @@ export const ProgressPanel: React.FC<ProgressPanelProps> = ({
       </div>
 
       <div className="mt-6 mb-8">
-        <div className="h-[3px] w-full bg-gray-100 rounded-full overflow-hidden">
+        <div className="flex items-center justify-between text-xs text-gray-500 mb-2 font-medium">
+          <span>Overall Progress</span>
+          <span className="font-mono font-semibold text-gray-700">{pipelinePercent}%</span>
+        </div>
+        <div className="h-[4px] w-full bg-gray-100 rounded-full overflow-hidden">
           <div
-            className="h-full bg-gray-950 transition-all duration-500"
+            className="h-full bg-gray-950 transition-all duration-500 ease-out"
             style={{ width: `${pipelinePercent}%` }}
           />
-        </div>
-        <div className="mt-3 text-right">
-          <span className="text-xs text-gray-500">{pipelinePercent}%</span>
         </div>
       </div>
 
