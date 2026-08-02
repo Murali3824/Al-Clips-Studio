@@ -11,6 +11,12 @@ export type ClipResult = {
   userStart: number | null;
   userEnd: number | null;
   score: number;
+  hookScore?: number | null;
+  retentionScore?: number | null;
+  emotionalImpact?: number | null;
+  productionScore?: number | null;
+  seoScore?: number | null;
+  viralScore?: number | null;
   hook: string;
   type?: string;
   trimStart?: number;
