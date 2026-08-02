@@ -8,8 +8,26 @@ warnings.filterwarnings(
     message=r"urllib3 .* doesn't match a supported version!",
 )
 
+import logging
+
 import requests
 from highlights.ollama_highlights import OllamaUnavailable, get_highlights
+
+# Phase B–L — Editorial Intelligence Pipeline Passes 0–9 Complete Redesign (additive)
+from highlights.intent_detector import run_intent_detection
+from highlights.conversation_blocks import run_conversation_block_detection
+from highlights.semantic_segmenter import run_semantic_segmentation
+from highlights.clip_candidate_builder import run_clip_candidate_building
+from highlights.boundary_refiner import run_boundary_refinement
+from highlights.editorial_review_board import run_editorial_review_board
+from highlights.production_scorer import run_production_scoring
+from highlights.candidate_diversity import run_candidate_diversity
+from highlights.candidate_ranker import run_final_ranking
+from highlights.editorial_qa import run_editorial_qa
+from highlights.production_exporter import run_production_export
+from highlights.llm_provider import get_llm_provider
+
+logger = logging.getLogger(__name__)
 
 
 HOOK_WORDS = {
@@ -729,7 +747,157 @@ def _deduplicate_and_merge_highlights(highlights: list[dict], max_duration: floa
 
 def run(context):
     settings = context["settings"]
-    
+
+    # ── PASS 0: Video Intent Detection (Phase B) ───────────────────────────
+    # Classifies the content type and writes intent_profile.json.
+    try:
+        _llm_provider = get_llm_provider(settings)
+        _intent_profile = run_intent_detection(context, _llm_provider)
+        logger.info(
+            "Intent detected: '%s' (confidence=%.2f)",
+            _intent_profile.primary_type,
+            _intent_profile.confidence,
+        )
+    except Exception as _intent_exc:  # pragma: no cover
+        logger.warning("Intent detection failed (non-fatal): %s", _intent_exc)
+        _intent_profile = None
+
+    # ── PASS 1: Conversation Block Detection (Phase C) ──────────────────────
+    # Groups transcript into rich editorial ConversationBlock objects with Conversation Memory.
+    try:
+        _conversation_blocks = run_conversation_block_detection(context, _intent_profile)
+        logger.info(
+            "Conversation blocks generated: %d blocks",
+            len(_conversation_blocks),
+        )
+    except Exception as _block_exc:  # pragma: no cover
+        logger.warning("Conversation block detection failed (non-fatal): %s", _block_exc)
+        _conversation_blocks = []
+
+    # ── PASS 2: Editorial Segment Builder / Semantic Segmenter (Phase D) ─────
+    # Groups ConversationBlocks into complete, topically coherent EditorialSegments.
+    try:
+        _editorial_segments = run_semantic_segmentation(context, _conversation_blocks, _intent_profile)
+        logger.info(
+            "Editorial segments built: %d segments",
+            len(_editorial_segments),
+        )
+    except Exception as _seg_exc:  # pragma: no cover
+        logger.warning("Semantic segmentation failed (non-fatal): %s", _seg_exc)
+        _editorial_segments = []
+
+    # ── PASS 3: Editorial Clip Constructor / Candidate Builder (Phase E) ─────
+    # Transforms EditorialSegments into production-ready HighlightCandidate objects.
+    try:
+        _highlight_candidates = run_clip_candidate_building(
+            context, _editorial_segments, _conversation_blocks, _intent_profile
+        )
+        logger.info(
+            "Highlight candidates constructed: %d candidates",
+            len(_highlight_candidates),
+        )
+    except Exception as _cand_exc:  # pragma: no cover
+        logger.warning("Clip candidate construction failed (non-fatal): %s", _cand_exc)
+        _highlight_candidates = []
+
+    # ── PASS 4: Editorial Refinement Engine / Boundary Refiner (Phase F) ─────
+    # Iteratively refines boundaries and calculates Editorial Quality Scores.
+    try:
+        _highlight_candidates = run_boundary_refinement(
+            context, _highlight_candidates, _conversation_blocks, _intent_profile
+        )
+        logger.info(
+            "Highlight candidates refined: %d candidates",
+            len(_highlight_candidates),
+        )
+    except Exception as _refine_exc:  # pragma: no cover
+        logger.warning("Boundary refinement failed (non-fatal): %s", _refine_exc)
+
+    # ── PASS 5: Editorial Review Board (Phase G) ───────────────────────────
+    # Evaluates candidates across 12 structured criteria and detects rejection reasons.
+    try:
+        _editorial_reviews = run_editorial_review_board(
+            context, _highlight_candidates, _llm_provider, _intent_profile
+        )
+        logger.info(
+            "Editorial reviews generated: %d reviews",
+            len(_editorial_reviews),
+        )
+    except Exception as _review_exc:  # pragma: no cover
+        logger.warning("Editorial review board evaluation failed (non-fatal): %s", _review_exc)
+        _editorial_reviews = []
+
+    # ── PASS 6: Production Scoring Engine (Phase H) ────────────────────────
+    # Combines 15 signal dimensions into a final production score per candidate.
+    try:
+        _production_scores = run_production_scoring(
+            context, _highlight_candidates, _editorial_reviews, _intent_profile
+        )
+        logger.info(
+            "Production scores calculated: %d scores",
+            len(_production_scores),
+        )
+    except Exception as _score_exc:  # pragma: no cover
+        logger.warning("Production scoring engine failed (non-fatal): %s", _score_exc)
+        _production_scores = []
+
+    # ── PHASE I: Candidate Diversity & Duplicate Filtering Engine ───────────
+    # Detects duplicates across 8 signals, clusters candidates, and retains the winner per cluster.
+    try:
+        _highlight_candidates = run_candidate_diversity(
+            context, _highlight_candidates, _production_scores, _intent_profile
+        )
+        logger.info(
+            "Candidate diversity filtering complete: %d total candidates processed",
+            len(_highlight_candidates),
+        )
+    except Exception as _diversity_exc:  # pragma: no cover
+        logger.warning("Candidate diversity filtering failed (non-fatal): %s", _diversity_exc)
+
+    # ── PHASE J: Final Ranking & Selection Engine (Pass 7) ──────────────────
+    # Ranks non-duplicate candidates using multi-dimensional RankingScores and selects clips.
+    try:
+        _final_rankings = run_final_ranking(
+            context, _highlight_candidates, _production_scores, _intent_profile
+        )
+        logger.info(
+            "Final candidate ranking complete: %d candidates ranked",
+            len(_final_rankings),
+        )
+    except Exception as _ranking_exc:  # pragma: no cover
+        logger.warning("Final candidate ranking failed (non-fatal): %s", _ranking_exc)
+        _final_rankings = []
+
+    # ── PHASE K: Final Editorial QA Gate (Pass 8) ───────────────────────────
+    # Validates selected candidates against 18-point Production QA Checklist with self-correction repair.
+    try:
+        _qa_reports = run_editorial_qa(
+            context, _final_rankings, _highlight_candidates
+        )
+        logger.info(
+            "Final Editorial QA Gate validation complete: %d QA reports generated",
+            len(_qa_reports),
+        )
+    except Exception as _qa_exc:  # pragma: no cover
+        logger.warning("Final Editorial QA Gate validation failed (non-fatal): %s", _qa_exc)
+        _qa_reports = []
+
+    # ── PHASE L: Production Export & Final Packaging (Pass 9) ───────────────
+    # Exports selected & QA-approved candidates to highlights.json and export_report.json.
+    try:
+        _final_exports = run_production_export(
+            context, _final_rankings, _qa_reports, _highlight_candidates
+        )
+        logger.info(
+            "Production export complete: %d final highlights exported to highlights.json",
+            len(_final_exports),
+        )
+        if _final_exports is not None:
+            logger.info("Editorial Intelligence Pipeline Passes 0–9 completed successfully. Exiting stage 4.")
+            return
+    except Exception as _export_exc:  # pragma: no cover
+        logger.warning("Production export failed (non-fatal): %s", _export_exc)
+
     # 1. Resolve configuration parameters
     clip_generation_mode = settings.get("clipGenerationMode", "auto")
     coverage_mode = settings.get("coverageMode", "best")
@@ -766,6 +934,8 @@ def run(context):
     # ── PASS 1: Identify Candidate Highlights ──────────────────────────────
     fallback_reason = None
     try:
+        if settings.get("llmProvider") == "null":
+            raise OllamaUnavailable("llmProvider is set to 'null' (offline heuristic mode)")
         selected, _model = _from_ollama(
             transcript, words, max_clips, min_duration, max_duration, settings,
             coverage_mode=coverage_mode, preferred_duration=preferred_duration
