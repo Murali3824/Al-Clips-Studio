@@ -165,11 +165,11 @@ function ProjectCard({
         <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center opacity-0 group-hover:opacity-100">
           <div className="bg-white/90 backdrop-blur-sm text-gray-950 text-xs font-semibold px-4 py-2 rounded-xl shadow-lg">
             {project.status === "processing"
-              ? "Resume Processing →"
+              ? "Processing..."
               : project.status === "uploading"
               ? "Resume Upload →"
               : project.status === "failed"
-              ? "View Details →"
+              ? "Resume Processing →"
               : "Open Project →"}
           </div>
         </div>
@@ -209,9 +209,11 @@ function ProjectCard({
             className="flex-1 text-xs font-semibold text-white bg-gray-950 rounded-lg px-3 py-1.5 hover:bg-gray-800 transition-colors"
           >
             {project.status === "processing"
-              ? "Resume"
+              ? "Processing"
               : project.status === "uploading"
               ? "Resume Upload"
+              : project.status === "failed"
+              ? "Resume"
               : "Open"}
           </button>
           <button
