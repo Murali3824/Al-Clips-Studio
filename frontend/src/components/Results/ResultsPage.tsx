@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect } from "react";
 import { ClipSelector } from "./ClipSelector";
 import { EditorLayout } from "../Editor/EditorLayout";
 import { useResultsStore } from "../../stores/resultsStore";
+import { deepEqual, cloneDeep, getDirtyFields, getDiffPayload } from "../../utils/deepEqual";
 
 interface ResultsPageProps {
   clips: any[];
@@ -261,9 +262,14 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const trimTimeoutRef = useRef<any>(null);
+  const originalClipStatesRef = useRef<Record<string, any>>({});
   const [currentTime, setCurrentTime] = useState(0);
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [renderError, setRenderError] = useState<string | null>(null);
+  const [expandedDesc, setExpandedDesc] = useState(false);
+  const [savingClips, setSavingClips] = useState<Record<string, boolean>>({});
+  const [saveSuccessClips, setSaveSuccessClips] = useState<Record<string, string | null>>({});
+  const [renderErrorClips, setRenderErrorClips] = useState<Record<string, string | null>>({});
+
   const copyToClipboard = (text: string, fieldName: string) => {
     if (!text) return;
     navigator.clipboard.writeText(text);
@@ -281,6 +287,53 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
   };
 
   const selectedClip = clips.find((clip) => clip.id === selectedClipId) ?? null;
+  const currentClipState = selectedClip
+    ? { ...(selectedClip || {}), ...(selectedClipId ? (clipEdits[selectedClipId] || {}) : {}) }
+    : null;
+
+  const isCurrentClipSaving = selectedClipId ? Boolean(savingClips[selectedClipId]) : false;
+  const currentClipSaveSuccess = selectedClipId ? (saveSuccessClips[selectedClipId] ?? null) : null;
+  const currentClipRenderError = selectedClipId ? (renderErrorClips[selectedClipId] ?? null) : null;
+  const currentOriginalState = selectedClipId ? (originalClipStatesRef.current[selectedClipId] ?? null) : null;
+
+  // Initialize/Update per-clip baseline original state when modal opens or clip changes
+  useEffect(() => {
+    if (editorOpen && selectedClipId && selectedClip) {
+      if (!originalClipStatesRef.current[selectedClipId]) {
+        const initialEffective = {
+          ...(selectedClip || {}),
+          ...(clipEdits[selectedClipId] || {})
+        };
+        originalClipStatesRef.current[selectedClipId] = cloneDeep(initialEffective);
+      }
+    } else if (!editorOpen) {
+      originalClipStatesRef.current = {};
+      setSaveSuccessClips({});
+      setRenderErrorClips({});
+      setSavingClips({});
+    }
+  }, [editorOpen, selectedClipId]);
+
+  // Compute field-level and global dirty state strictly for current clip
+  const dirtyFields = (selectedClipId && currentOriginalState && currentClipState)
+    ? getDirtyFields(currentOriginalState, currentClipState)
+    : {};
+  const isDirty = Object.values(dirtyFields).some(Boolean);
+
+  // Keyboard shortcut: ESC key closes editor directly
+  useEffect(() => {
+    if (!editorOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (selectedClipId) {
+          setRenderErrorClips((prev) => ({ ...prev, [selectedClipId]: null }));
+        }
+        closeEditor();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editorOpen, selectedClipId]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -345,20 +398,58 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
     }, 500);
   };
 
-  const handleSaveRender = async () => {
-    if (!activeJobId || !selectedClipId) return;
-    const targetClipId = selectedClipId;
-    const edits = clipEdits[targetClipId] || {};
+  const handleDiscardEdits = () => {
+    if (selectedClipId) {
+      updateClipEdit(selectedClipId, {});
+      useResultsStore.setState((state) => {
+        const next = { ...state.clipEdits };
+        delete next[selectedClipId];
+        return { clipEdits: next };
+      });
+    }
+    // setShowUnsavedPrompt(false); // Cleaned up
+    if (selectedClipId) {
+      setRenderErrorClips((prev) => ({ ...prev, [selectedClipId]: null }));
+    }
+    closeEditor();
+  };
 
-    setRenderError(null);
+  const handleSaveRender = async (targetClipIdParam?: string, closeAfterSave: boolean = true) => {
+    const targetClipId = targetClipIdParam || selectedClipId;
+    if (!activeJobId || !targetClipId || savingClips[targetClipId]) return;
+
+    const clipOriginalState = originalClipStatesRef.current[targetClipId];
+    const clipTargetObj = clips.find((c) => c.id === targetClipId);
+    const clipStateToSave = clipTargetObj
+      ? { ...(clipTargetObj || {}), ...(clipEdits[targetClipId] || {}) }
+      : null;
+
+    const targetDirtyFields = (clipOriginalState && clipStateToSave)
+      ? getDirtyFields(clipOriginalState, clipStateToSave)
+      : {};
+    const targetIsDirty = Object.values(targetDirtyFields).some(Boolean);
+
+    // Strict guard: Never call save API when target clip is clean
+    if (!targetIsDirty && clipOriginalState) {
+      if (closeAfterSave && useResultsStore.getState().selectedClipId === targetClipId) {
+        closeEditor();
+      }
+      return;
+    }
+
+    const diffPayload = getDiffPayload(clipOriginalState || {}, clipStateToSave || {});
+
+    setRenderErrorClips((prev) => ({ ...prev, [targetClipId]: null }));
+    setSaveSuccessClips((prev) => ({ ...prev, [targetClipId]: null }));
+    setSavingClips((prev) => ({ ...prev, [targetClipId]: true }));
     setRenderingClip(targetClipId, "Saving Changes...", 5);
 
     try {
-      if (Object.keys(edits).length > 0) {
+      if (Object.keys(diffPayload).length > 0) {
         const editRes = await fetch(`http://localhost:3001/api/results/${activeJobId}/clips/${targetClipId}/edit`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(edits)
+          body: JSON.stringify(diffPayload)
         });
         if (!editRes.ok) {
           const errData = await editRes.json().catch(() => ({}));
@@ -380,20 +471,29 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
       incrementVideoVersion(targetClipId);
       setProcessMessage("Changes saved & rendered successfully.");
       setRenderingClip(targetClipId, null, null);
+      setSavingClips((prev) => ({ ...prev, [targetClipId]: false }));
 
-      // Close editor only if user is still viewing this target clip
-      if (useResultsStore.getState().selectedClipId === targetClipId) {
+      // Update baseline state ONLY for targetClipId
+      originalClipStatesRef.current[targetClipId] = cloneDeep(clipStateToSave);
+
+      setSaveSuccessClips((prev) => ({ ...prev, [targetClipId]: "Changes saved successfully ✓" }));
+      setTimeout(() => {
+        setSaveSuccessClips((prev) => ({ ...prev, [targetClipId]: null }));
+      }, 3000);
+
+      if (closeAfterSave && useResultsStore.getState().selectedClipId === targetClipId) {
         closeEditor();
       }
     } catch (err: any) {
+      setSavingClips((prev) => ({ ...prev, [targetClipId]: false }));
       const msg = err.message || "Failed to process edits.";
-      setRenderError(msg);
+      setRenderErrorClips((prev) => ({ ...prev, [targetClipId]: msg }));
       setProcessMessage(`Error: ${msg}`);
       setRenderingClip(targetClipId, null, null);
     }
   };
 
-  const ec = selectedClip ? { ...(selectedClip || {}), ...(selectedClipId ? (clipEdits[selectedClipId] || {}) : {}) } : null;
+  const ec = currentClipState;
 
   const captionChunk = ec ? getCaptionForTime(ec.words, currentTime, ec.captionDisplayMode ?? settings.captionDisplayMode ?? "phrase") : null;
   const activeRender = selectedClipId ? renderingClips[selectedClipId] : null;
@@ -568,12 +668,12 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
               {/* Header & Main Actions */}
               <div className="flex flex-col sm:flex-row items-start justify-between gap-4 border-b border-gray-200 pb-5">
                 <div className="flex-1 min-w-0">
-                  <h1 className="text-xl font-semibold text-gray-950 font-[Geist] leading-snug truncate">
+                  <h1 className="text-xl font-semibold text-gray-950 font-[Geist] leading-snug ">
                     {selectedClip.title || `Clip ${selectedClip.id}`}
                   </h1>
                   <div className="flex flex-wrap items-center gap-2 mt-2.5">
-                    <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full border ${getScoreColor(selectedClip.score)}`}>
-                      🔥 {selectedClip.score} Viral Score
+                    <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full border ${getScoreColor(selectedClip.score ?? selectedClip.viralScore)}`}>
+                      🔥 Viral Score {selectedClip.viralScore ?? selectedClip.score != null ? `${selectedClip.viralScore ?? selectedClip.score} / 100` : "N/A"}
                     </span>
                     <span className="text-xs text-gray-600 font-mono bg-white border border-gray-200 rounded-full px-2.5 py-0.5">
                       ⏱️ {selectedClip.duration.toFixed(1)}s
@@ -607,6 +707,54 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
                     Download
                   </a>
+                </div>
+              </div>
+
+              {/* 📊 Score Breakdown Card */}
+              <div className="rounded-xl border border-gray-200 bg-white p-4 space-y-3 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide">📊 Performance & Score Breakdown</span>
+                  <span className="text-xs font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
+                    Overall: {selectedClip.score != null ? `${selectedClip.score} / 100` : "N/A"}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs font-medium">
+                  <div className="bg-gray-50 border border-gray-100 rounded-lg p-2.5 flex flex-col">
+                    <span className="text-gray-400 text-[10px]">Hook Score</span>
+                    <span className="text-gray-950 font-bold text-sm mt-0.5">
+                      {selectedClip.hookScore != null ? `${selectedClip.hookScore} / 100` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="bg-gray-50 border border-gray-100 rounded-lg p-2.5 flex flex-col">
+                    <span className="text-gray-400 text-[10px]">Retention</span>
+                    <span className="text-gray-950 font-bold text-sm mt-0.5">
+                      {selectedClip.retentionScore != null ? `${selectedClip.retentionScore} / 100` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="bg-gray-50 border border-gray-100 rounded-lg p-2.5 flex flex-col">
+                    <span className="text-gray-400 text-[10px]">Emotional Impact</span>
+                    <span className="text-gray-950 font-bold text-sm mt-0.5">
+                      {selectedClip.emotionalImpact != null ? `${selectedClip.emotionalImpact} / 100` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="bg-gray-50 border border-gray-100 rounded-lg p-2.5 flex flex-col">
+                    <span className="text-gray-400 text-[10px]">Production Score</span>
+                    <span className="text-gray-950 font-bold text-sm mt-0.5">
+                      {selectedClip.productionScore != null ? `${selectedClip.productionScore} / 100` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="bg-gray-50 border border-gray-100 rounded-lg p-2.5 flex flex-col">
+                    <span className="text-gray-400 text-[10px]">SEO Score</span>
+                    <span className="text-gray-950 font-bold text-sm mt-0.5">
+                      {selectedClip.seoScore != null ? `${selectedClip.seoScore} / 100` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="bg-emerald-50/60 border border-emerald-200 rounded-lg p-2.5 flex flex-col">
+                    <span className="text-emerald-700 text-[10px] font-semibold">Viral Score</span>
+                    <span className="text-emerald-800 font-bold text-sm mt-0.5">
+                      {selectedClip.viralScore != null ? `${selectedClip.viralScore} / 100` : (selectedClip.score != null ? `${selectedClip.score} / 100` : "N/A")}
+                    </span>
+                  </div>
                 </div>
               </div>
 
@@ -674,12 +822,23 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
                         onClick={() => copyToClipboard(selectedClip.description || "", "desc")}
                         className="text-xs text-gray-500 hover:text-gray-950 font-medium transition-colors"
                       >
-                        {copiedField === "desc" ? "✓ Copied" : "Copy Description"}
+                        {copiedField === "desc" ? "✓ Copied Full Description" : "Copy Description"}
                       </button>
                     </div>
                     <p className="text-xs text-gray-700 leading-relaxed whitespace-pre-line">
-                      {selectedClip.description}
+                      {expandedDesc || selectedClip.description.length <= 160
+                        ? selectedClip.description
+                        : `${selectedClip.description.slice(0, 160)}...`}
                     </p>
+                    {selectedClip.description.length > 160 && (
+                      <button
+                        type="button"
+                        onClick={() => setExpandedDesc(!expandedDesc)}
+                        className="text-xs font-semibold text-blue-600 hover:text-blue-800 transition-colors pt-1"
+                      >
+                        {expandedDesc ? "Show Less ↑" : "Read More ↓"}
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -735,17 +894,25 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
       {editorOpen && selectedClip && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
-          onClick={(e) => { if (e.target === e.currentTarget) closeEditor(); }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              if (selectedClipId) setRenderErrorClips((prev) => ({ ...prev, [selectedClipId]: null }));
+              closeEditor();
+            }
+          }}
         >
           <div className="relative w-full max-w-2xl max-h-[90vh] flex flex-col rounded-2xl bg-white shadow-2xl border border-gray-200 animate-scale-in">
             {/* Modal header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 flex-shrink-0">
               <div>
                 <h2 className="text-base font-semibold text-gray-950 font-[Geist]">Edit Clip</h2>
-                <p className="text-xs text-gray-400 mt-0.5 truncate max-w-xs">{selectedClip.title}</p>
+                <p className="text-xs text-gray-400 mt-0.5  max-w-xs">{selectedClip.title}</p>
               </div>
               <button
-                onClick={closeEditor}
+                onClick={() => {
+                  if (selectedClipId) setRenderErrorClips((prev) => ({ ...prev, [selectedClipId]: null }));
+                  closeEditor();
+                }}
                 className="p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"
                 aria-label="Close editor"
               >
@@ -758,6 +925,7 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
               <EditorLayout
                 selectedClip={selectedClip}
                 clipEdits={clipEdits}
+                dirtyFields={dirtyFields}
                 editorTab={editorTab}
                 setEditorTab={setEditorTab}
                 updateClipEdit={updateClipEdit}
@@ -775,13 +943,20 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
             {/* Modal footer — Save / Cancel / Error */}
             <div className="flex flex-col gap-2 px-6 py-4 border-t border-gray-100 flex-shrink-0 bg-gray-50 rounded-b-2xl">
               {/* Error banner */}
-              {renderError && (
+              {currentClipRenderError && (
                 <div className="flex items-start gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs font-medium animate-fade-in">
                   <svg className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
                   </svg>
-                  <span>{renderError}</span>
-                  <button onClick={() => setRenderError(null)} className="ml-auto text-red-400 hover:text-red-700">
+                  <span>{currentClipRenderError}</span>
+                  <button
+                    onClick={() => {
+                      if (selectedClipId) {
+                        setRenderErrorClips((prev) => ({ ...prev, [selectedClipId]: null }));
+                      }
+                    }}
+                    className="ml-auto text-red-400 hover:text-red-700"
+                  >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                   </button>
                 </div>
@@ -807,21 +982,37 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({
 
               <div className="flex items-center justify-between">
                 <button
-                  onClick={() => { setRenderError(null); closeEditor(); }}
-                  disabled={isCurrentClipRendering}
+                  onClick={() => {
+                    if (selectedClipId) {
+                      setRenderErrorClips((prev) => ({ ...prev, [selectedClipId]: null }));
+                    }
+                    closeEditor();
+                  }}
+                  disabled={isCurrentClipSaving || isCurrentClipRendering}
                   className="text-sm font-medium text-gray-500 hover:text-gray-800 transition-colors px-4 py-2 rounded-lg hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   Cancel
                 </button>
                 <button
-                  onClick={handleSaveRender}
-                  disabled={isCurrentClipRendering}
-                  className="bg-gray-950 text-white text-sm font-semibold rounded-lg px-6 py-2.5 hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                  onClick={() => handleSaveRender(selectedClipId ?? undefined, true)}
+                  disabled={!isDirty || isCurrentClipSaving || isCurrentClipRendering}
+                  className={`text-sm font-semibold rounded-lg px-6 py-2.5 transition-all flex items-center gap-2 ${
+                    !isDirty || isCurrentClipSaving || isCurrentClipRendering
+                      ? "bg-gray-100 text-gray-400 opacity-60 cursor-not-allowed pointer-events-none"
+                      : "bg-gray-950 text-white hover:bg-gray-800 cursor-pointer shadow-sm active:scale-[0.98]"
+                  }`}
                 >
-                  {isCurrentClipRendering ? (
+                  {isCurrentClipSaving || isCurrentClipRendering ? (
                     <>
                       <span className="w-3.5 h-3.5 rounded-full border-2 border-white/30 border-t-white animate-spin" />
-                      Applying Changes...
+                      Saving...
+                    </>
+                  ) : currentClipSaveSuccess ? (
+                    <>
+                      <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                      </svg>
+                      Changes Saved
                     </>
                   ) : (
                     "Save Changes"
