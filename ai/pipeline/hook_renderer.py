@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 # Fixed Design System Constants (Single Source of Truth)
-FIXED_HOOK_PADDING_BASE = 10       # 10px base design padding
+FIXED_HOOK_PADDING_BASE = 6       # 10px base design padding
 FIXED_HOOK_RADIUS_BASE = 8         # 8px base design border radius
 
 
