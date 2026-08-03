@@ -225,39 +225,50 @@ def _merge_anchor_samples(face_samples, body_samples, clip_start, clip_end, fram
     return raw_anchors
 
 
-def _ema_smooth(anchors, alpha_pos, alpha_size):
-    smoothed = []
-    s_x = s_y = s_fw = s_fh = None
+def _median_smooth(anchors):
+    """Median-of-3 temporal filter to eliminate single-sample detector jitter
 
-    for anchor in anchors:
+    without creating asymptotic EMA drift.
+    """
+    smoothed = []
+    window = []
+
+    for idx, anchor in enumerate(anchors):
         ax = anchor.get("anchorX")
         ay = anchor.get("anchorY")
         fw = anchor.get("faceWidth")
         fh = anchor.get("faceHeight")
 
         if ax is None or ay is None:
-            s_x = s_y = s_fw = s_fh = None
+            window.clear()
             smoothed.append({**anchor})
             continue
 
-        if s_x is None:
-            s_x, s_y = ax, ay
-            s_fw = fw if fw is not None else 100.0
-            s_fh = fh if fh is not None else 180.0
+        window.append(anchor)
+        if len(window) > 3:
+            window.pop(0)
+
+        if len(window) == 1:
+            m_x, m_y = ax, ay
+            m_fw = fw if fw is not None else 100.0
+            m_fh = fh if fh is not None else 180.0
         else:
-            s_x = alpha_pos * ax + (1.0 - alpha_pos) * s_x
-            s_y = alpha_pos * ay + (1.0 - alpha_pos) * s_y
-            if fw is not None:
-                s_fw = alpha_size * fw + (1.0 - alpha_size) * s_fw
-            if fh is not None:
-                s_fh = alpha_size * fh + (1.0 - alpha_size) * s_fh
+            xs = sorted([item["anchorX"] for item in window if item.get("anchorX") is not None])
+            ys = sorted([item["anchorY"] for item in window if item.get("anchorY") is not None])
+            fws = sorted([item["faceWidth"] for item in window if item.get("faceWidth") is not None])
+            fhs = sorted([item["faceHeight"] for item in window if item.get("faceHeight") is not None])
+
+            m_x = statistics.median(xs) if xs else ax
+            m_y = statistics.median(ys) if ys else ay
+            m_fw = statistics.median(fws) if fws else (fw or 100.0)
+            m_fh = statistics.median(fhs) if fhs else (fh or 180.0)
 
         smoothed.append({
             **anchor,
-            "anchorX": round(s_x, 3),
-            "anchorY": round(s_y, 3),
-            "faceWidth": round(s_fw, 3) if s_fw is not None else None,
-            "faceHeight": round(s_fh, 3) if s_fh is not None else None,
+            "anchorX": round(m_x, 3),
+            "anchorY": round(m_y, 3),
+            "faceWidth": round(m_fw, 3) if m_fw is not None else None,
+            "faceHeight": round(m_fh, 3) if m_fh is not None else None,
             "rawAnchorX": round(ax, 3),
             "rawAnchorY": round(ay, 3),
         })
@@ -300,7 +311,7 @@ def run(context):
         body_samples = _body_samples_for_track(best_track, clip_start, clip_end) if best_track else []
 
         raw_anchors = _merge_anchor_samples(face_samples, body_samples, clip_start, clip_end, frame_times)
-        smoothed_anchors = _ema_smooth(raw_anchors, EMA_ALPHA_POSITION, EMA_ALPHA_SIZE)
+        smoothed_anchors = _median_smooth(raw_anchors)
 
         source_counts = {}
         for a in smoothed_anchors:
