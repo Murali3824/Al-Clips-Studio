@@ -10,13 +10,31 @@ import {
   writeClipEdit,
   writeTrim,
   runRetrim,
+  saveEndThumbnail,
+  removeEndThumbnail,
   storageRoot
 } from "../services/results.service.js";
 
 const storagePathRoot = storageRoot;
 
+const endThumbnailUpload = multer({
+  dest: path.resolve(storageRoot, "temp"),
+  limits: { fileSize: 15 * 1024 * 1024 }
+});
 
 export const resultsRouter = Router();
+
+function safeSendFile(response: any, filePath: string, options?: any) {
+  response.sendFile(filePath, options, (err: any) => {
+    if (err && !response.headersSent) {
+      if (err.code === "ECONNRESET" || err.name === "RangeNotSatisfiableError" || err.status === 416) {
+        response.status(416).end();
+      } else {
+        console.warn(`[sendFile Warning] ${filePath}:`, err.message || err);
+      }
+    }
+  });
+}
 
 resultsRouter.get("/:jobId", (request, response) => {
   const results = readResults(request.params.jobId);
@@ -77,7 +95,7 @@ resultsRouter.get("/:jobId/clips/:clipId", async (request, response) => {
     return;
   }
 
-  response.sendFile(clipPath);
+  safeSendFile(response, clipPath);
 });
 
 // GET /api/results/:jobId/clips/:clipId/download — force-download with Content-Disposition header
@@ -108,7 +126,7 @@ resultsRouter.get("/:jobId/clips/:clipId/download", async (request, response) =>
 
   response.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   response.setHeader("Content-Type", "video/mp4");
-  response.sendFile(clipPath);
+  safeSendFile(response, clipPath);
 });
 
 resultsRouter.get("/:jobId/thumbnails/:clipId", async (request, response) => {
@@ -119,7 +137,72 @@ resultsRouter.get("/:jobId/thumbnails/:clipId", async (request, response) => {
     return;
   }
 
-  response.sendFile(thumbnailPath);
+  safeSendFile(response, thumbnailPath);
+});
+
+// GET /api/results/:jobId/thumbnails/:clipId/download — force-download thumbnail image
+resultsRouter.get("/:jobId/thumbnails/:clipId/download", async (request, response) => {
+  const { jobId, clipId } = request.params;
+  const thumbnailPath = await getThumbnailPath(jobId, clipId);
+
+  if (!thumbnailPath) {
+    response.status(404).json({ message: "Thumbnail not found." });
+    return;
+  }
+
+  let filename = `${clipId}_thumbnail.png`;
+  try {
+    const outputDir = path.resolve(storagePathRoot, "outputs", jobId);
+    const clipsJson = path.resolve(outputDir, "clips.json");
+    if (fs.existsSync(clipsJson)) {
+      const data = JSON.parse(fs.readFileSync(clipsJson, "utf-8"));
+      const clip = data.clips?.find((c: any) => c.id === clipId);
+      if (clip?.title) {
+        filename = `${clip.title.replace(/[^\w\s-]/g, "").replace(/\s+/g, "_").slice(0, 80)}_thumbnail.png`;
+      }
+    }
+  } catch { /* fallback to clipId filename */ }
+
+  response.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  response.setHeader("Content-Type", "image/png");
+  safeSendFile(response, thumbnailPath);
+});
+
+// POST /api/results/:jobId/clips/:clipId/end-thumbnail - Upload 9:16 end thumbnail image
+resultsRouter.post("/:jobId/clips/:clipId/end-thumbnail", endThumbnailUpload.single("file"), async (request, response) => {
+  const { jobId, clipId } = request.params;
+  if (!request.file) {
+    response.status(400).json({ message: "No image file uploaded." });
+    return;
+  }
+  try {
+    const endThumbnail = await saveEndThumbnail(jobId, clipId, request.file);
+    response.status(200).json({ success: true, endThumbnail });
+  } catch (error: any) {
+    response.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// DELETE /api/results/:jobId/clips/:clipId/end-thumbnail - Remove end thumbnail
+resultsRouter.delete("/:jobId/clips/:clipId/end-thumbnail", async (request, response) => {
+  const { jobId, clipId } = request.params;
+  try {
+    const result = await removeEndThumbnail(jobId, clipId);
+    response.status(200).json(result);
+  } catch (error: any) {
+    response.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// GET /api/results/:jobId/end-thumbnail/:filename - Serve end thumbnail image
+resultsRouter.get("/:jobId/end-thumbnail/:filename", (request, response) => {
+  const { jobId, filename } = request.params;
+  const imgPath = path.resolve(storagePathRoot, "outputs", jobId, "thumbnails", filename);
+  if (fs.existsSync(imgPath)) {
+    safeSendFile(response, imgPath);
+  } else {
+    response.status(404).json({ message: "End thumbnail image not found." });
+  }
 });
 
 resultsRouter.get("/:jobId/translations/:language/:clipId", (request, response) => {
@@ -134,7 +217,7 @@ resultsRouter.get("/:jobId/translations/:language/:clipId", (request, response) 
     return;
   }
 
-  response.sendFile(translatedPath);
+  safeSendFile(response, translatedPath);
 });
 
 // Helper: resolve directory for asset type ('music' -> storage/music, others -> storage/assets/:type)
@@ -210,7 +293,7 @@ resultsRouter.get("/assets/:type/:filename", (request, response) => {
   const { type, filename } = request.params;
   const assetPath = path.join(getAssetDir(type), filename);
   if (fs.existsSync(assetPath)) {
-    response.sendFile(assetPath);
+    safeSendFile(response, assetPath);
   } else {
     response.status(404).json({ message: "Asset not found." });
   }
