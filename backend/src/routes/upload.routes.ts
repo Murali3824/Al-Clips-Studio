@@ -149,7 +149,16 @@ uploadRouter.get("/:jobId/video", (request, response) => {
       response.status(404).json({ message: "Video file not found in upload directory." });
       return;
     }
-    response.sendFile(path.resolve(uploadDir, videoFile));
+    const videoPath = path.resolve(uploadDir, videoFile);
+    response.sendFile(videoPath, (err: any) => {
+      if (err && !response.headersSent) {
+        if (err.code === "ECONNRESET" || err.name === "RangeNotSatisfiableError" || err.status === 416) {
+          response.status(416).end();
+        } else {
+          console.warn(`[sendFile Warning] ${videoPath}:`, err.message || err);
+        }
+      }
+    });
   } catch (error: any) {
     response.status(500).json({ message: error.message || "Failed to stream video." });
   }
