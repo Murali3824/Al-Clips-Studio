@@ -121,9 +121,12 @@ def run_final_ranking(
     # 3. Sort candidates with tie-breaking for diversity
     ranked_pool = _sort_candidates_with_tie_breaking(eligible_candidates)
 
-    # 4. Selection Constraints (maxClips, maxTotalDuration, topic diversity)
-    max_clips = int(settings.get("maxClips", 5))
-    max_total_duration = float(settings.get("maxTotalDurationSec", 300.0))
+    # 4. Selection Constraints (clipCount / maxClips, dynamic maxTotalDuration, topic diversity)
+    req_clips = settings.get("clipCount") or settings.get("maxClips") or settings.get("clip_count") or 5
+    max_clips = int(req_clips)
+    max_clip_dur = float(settings.get("maxClipDuration") or 30.0)
+    dynamic_default_duration = max(1200.0, max_clips * max_clip_dur * 2.0)
+    max_total_duration = float(settings.get("maxTotalDurationSec", dynamic_default_duration))
 
     ranking_results: list[RankingCandidate] = []
     selected_count = 0
@@ -144,8 +147,8 @@ def run_final_ranking(
         elif accumulated_duration + cand.duration > max_total_duration and selected_count > 0:
             can_select = False
             rejection_reason = f"Excluded: total duration limit reached ({accumulated_duration:.1f}s + {cand.duration:.1f}s > {max_total_duration:.1f}s)"
-        elif topic == previous_topic and len(ranked_pool) > max_clips:
-            # Consecutive topic avoidance penalty (if we have alternative clips)
+        elif topic == previous_topic and len(ranked_pool) > (max_clips * 2) and selected_count < max_clips:
+            # Consecutive topic avoidance penalty only when ample candidate pool exists
             can_select = False
             rejection_reason = f"Excluded: consecutive clip from same topic ('{topic}')"
 
