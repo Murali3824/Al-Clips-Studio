@@ -276,8 +276,8 @@ def per_frame_camera_crop_filter(
         valid = [valid[int(i * step)] for i in range(max_keyframes)]
 
     def build_expr(axis: str, bound: int) -> str:
-        """Build a linearly-interpolated FFmpeg expression, clamped to [0, bound]."""
-        pts = [(float(f["time"]) - clip_start, float(f[axis])) for f in valid]
+        """Build an FFmpeg expression respecting explicit keyframe interp attributes ("HOLD", "STEP", "LINEAR", "HERMITE")."""
+        pts = [(float(f["time"]) - clip_start, float(f[axis]), f.get("interp", "HOLD")) for f in valid]
         pts.sort(key=lambda p: p[0])
 
         if len(pts) == 1:
@@ -288,18 +288,21 @@ def per_frame_camera_crop_filter(
         last_v = int(max(0, min(bound, round(pts[-1][1]))))
         expr = str(last_v)
 
-        # Build right-to-left: each segment is a linear ramp
+        # Build right-to-left: evaluate explicit interp attribute
         for i in range(len(pts) - 2, -1, -1):
-            t1, v1 = pts[i]
-            t2, v2 = pts[i + 1]
+            t1, v1, interp1 = pts[i]
+            t2, v2, _ = pts[i + 1]
             dt = max(0.0001, t2 - t1)
             dv = v2 - v1
-            # Clamp endpoint values
             cv1 = int(max(0, min(bound, round(v1))))
-            if abs(dv) < 0.5:
+
+            # If interp is HOLD or STEP, or delta is sub-pixel (<0.5px), hold cv1 constant for t1 <= t < t2
+            if interp1 in ("HOLD", "STEP") or abs(dv) < 0.5:
                 seg_expr = str(cv1)
             else:
+                # LINEAR / HERMITE continuous slope ramp
                 seg_expr = f"({cv1}+{dv:.4f}*(t-{t1:.4f})/{dt:.4f})"
+
             expr = f"if(lt(t,{t2:.4f}),{seg_expr},{expr})"
 
         return expr
