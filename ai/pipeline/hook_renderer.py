@@ -10,23 +10,40 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 # Fixed Design System Constants (Single Source of Truth)
-FIXED_HOOK_PADDING_BASE = 6       # 10px base design padding
+FIXED_HOOK_PADDING_BASE = 10       # 10px base design padding
 FIXED_HOOK_RADIUS_BASE = 8         # 8px base design border radius
 
 
 def resolve_hook_text(clip_metadata: dict, settings: dict, clip: dict) -> str:
-    """Robustly resolve Hook text checking overrides, custom templates, and clip highlight fallback."""
-    # 1. Per-clip metadata override from Edit Clip UI
-    m_text = clip_metadata.get("autoHookText") or clip_metadata.get("hookText") or clip_metadata.get("hook2Text")
+    """Robustly resolve effective Hook text following single source of truth precedence (userHookText ?? hookText)."""
+    if clip_metadata is None:
+        clip_metadata = {}
+    if settings is None:
+        settings = {}
+    if clip is None:
+        clip = {}
+
+    # 1. User explicit override (highest priority)
+    u_text = clip_metadata.get("userHookText") or clip.get("userHookText")
+    if u_text and str(u_text).strip():
+        return str(u_text).strip()
+
+    # 2. Canonical immutable AI hook
+    h_text = clip_metadata.get("hookText") or clip.get("hookText")
+    if h_text and str(h_text).strip():
+        return str(h_text).strip()
+
+    # 3. Legacy metadata override fallbacks
+    m_text = clip_metadata.get("autoHookText") or clip_metadata.get("hookText") or clip_metadata.get("hook2Text") or clip_metadata.get("hook")
     if m_text and str(m_text).strip():
         return str(m_text).strip()
 
-    # 2. Global settings template override
+    # 4. Global settings template override
     s_text = settings.get("autoHookText") or settings.get("hookText") or settings.get("hook2Text")
     if s_text and str(s_text).strip():
         return str(s_text).strip()
 
-    # 3. Clip object AI highlight hook fallback
+    # 5. Clip object fallback
     c_text = clip.get("autoHookText") or clip.get("hook")
     if c_text and str(c_text).strip():
         return str(c_text).strip()
@@ -82,7 +99,7 @@ def _resolve_font(font_family: str, font_size: int) -> ImageFont.FreeTypeFont | 
 
 def render_hook_overlay_png(
     text: str,
-    font_family: str = "Arial Black",
+    font_family: str = "Arial",
     font_size: int = 76,
     text_color: str = "#ffffff",
     bg_color: str = "#16a34a",
@@ -99,8 +116,8 @@ def render_hook_overlay_png(
 
     # Calculate scale factor relative to 1080p canvas width (1080 / 430 ≈ 2.5)
     scale_factor = canvas_w / 430.0
-    padding_v = int(round(12 * scale_factor))  # 12px vertical padding (~30px)
-    padding_h = int(round(18 * scale_factor))  # 18px horizontal padding (~45px)
+    padding_v = int(round(15 * scale_factor))  # 12px vertical padding (~30px)
+    padding_h = int(round(15 * scale_factor))  # 18px horizontal padding (~45px)
     radius_px = int(round(8 * scale_factor))    # 8px radius (~20px)
 
     font = _resolve_font(font_family, font_size)
