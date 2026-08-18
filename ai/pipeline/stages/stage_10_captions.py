@@ -884,21 +884,24 @@ def run(context):
         if not clip_words:
             raise RuntimeError(f"No transcript words found for {clip['id']}")
 
+        metadata_file = context["output_dir"] / "metadata" / f"{clip['id']}.json"
+        clip_metadata = json.loads(metadata_file.read_text(encoding="utf-8")) if metadata_file.exists() else {}
+
         ass_path = captions_dir / f"{clip['id']}.ass"
-        ass_text = _style_header(1080, 1920, clip_metadata={}, settings=settings)
+        ass_text = _style_header(1080, 1920, clip_metadata=clip_metadata, settings=settings)
 
         # Hook rendering via PIL for pixel-perfect 8px border radius & 12px padding
-        hook_enabled = resolve_hook_enabled({}, settings)
-        hook_text = resolve_hook_text({}, settings, clip)
+        hook_enabled = resolve_hook_enabled(clip_metadata, settings)
+        hook_text = resolve_hook_text(clip_metadata, settings, clip)
         hook_png_path = context["temp_dir"] / f"hook_{clip['id']}.png"
         use_hook_png = False
 
         if hook_enabled and hook_text:
-            font_family = str(_get_hook_setting("Font", {}, settings, "Arial Black"))
-            font_size = int(_get_hook_setting("FontSize", {}, settings, 76))
-            text_color = str(_get_hook_setting("Color", {}, settings, "#ffffff"))
-            bg_color = str(_get_hook_setting("BgColor", {}, settings, "#16a34a"))
-            position = str(_get_hook_setting("Position", {}, settings, "top-center"))
+            font_family = str(_get_hook_setting("Font", clip_metadata, settings, "Arial Black"))
+            font_size = int(_get_hook_setting("FontSize", clip_metadata, settings, 76))
+            text_color = str(_get_hook_setting("Color", clip_metadata, settings, "#ffffff"))
+            bg_color = str(_get_hook_setting("BgColor", clip_metadata, settings, "#16a34a"))
+            position = str(_get_hook_setting("Position", clip_metadata, settings, "top-center"))
 
             render_hook_overlay_png(
                 text=hook_text,
@@ -933,14 +936,14 @@ def run(context):
         ass_filter_path = str(ass_path).replace("\\", "/").replace(":", r"\:")
 
         if use_hook_png:
-            dur_mode = str(_get_hook_setting("DurationMode", {}, settings, "custom"))
+            dur_mode = str(_get_hook_setting("DurationMode", clip_metadata, settings, "custom"))
             clip_dur = float(clip.get("duration", 5.0))
             if dur_mode == "entire":
                 hook_dur = clip_dur
             else:
-                hook_dur = float(_get_hook_setting("Duration", {}, settings, 5.0))
-            fade_in_s = float(_get_hook_setting("FadeIn", {}, settings, 300)) / 1000.0
-            fade_out_s = float(_get_hook_setting("FadeOut", {}, settings, 500)) / 1000.0
+                hook_dur = float(_get_hook_setting("Duration", clip_metadata, settings, 5.0))
+            fade_in_s = float(_get_hook_setting("FadeIn", clip_metadata, settings, 300)) / 1000.0
+            fade_out_s = float(_get_hook_setting("FadeOut", clip_metadata, settings, 500)) / 1000.0
             st_out = max(0.0, hook_dur - fade_out_s)
 
             filter_complex = (
@@ -974,10 +977,12 @@ def run(context):
             print(f"[AutoHook] Executing FFmpeg (no Hook PNG):\n  {' '.join(cmd)}", flush=True)
             run_command(cmd)
 
+        # Strip editorial text fields from clips.json payload (metadata/{clipId}.json is canonical owner)
+        clip_clean = {k: v for k, v in clip.items() if k not in ("title", "hook", "hookText", "userHookText", "autoHookText")}
+
         updated_clips.append({
-            **clip,
+            **clip_clean,
             "autoHook": use_hook_png,
-            "autoHookText": hook_text if use_hook_png else clip.get("autoHookText", ""),
             "layoutMode": clip.get("layoutMode", settings.get("layoutMode", "auto")),
             "resolvedLayout": clip.get("resolvedLayout", clip.get("crop", {}).get("resolvedLayout", "full-crop")),
             "captionPath": str(ass_path),
