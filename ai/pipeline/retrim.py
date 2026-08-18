@@ -187,6 +187,46 @@ def _hex_to_ass(hex_color: str) -> str:
         return f"&H{inv_a}{b}{g}{r}"
     return "&H00FFFFFF"
 
+def _append_end_thumbnail(input_video_path: str, image_path: str, output_video_path: str, width: int = 1080, height: int = 1920, duration: float = 0.5):
+    """Appends a 0.5s 9:16 thumbnail image to the end of an MP4 video."""
+    has_audio = has_audio_stream(input_video_path)
+    if has_audio:
+        filter_complex = (
+            f"[1:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,trim=duration={duration:.2f},select=gte(n\\,0)[end_v];"
+            f"anullsrc=channel_layout=stereo:sample_rate=44100:d={duration:.2f}[end_a_silent];"
+            f"[0:v][0:a][end_v][end_a_silent]concat=n=2:v=1:a=1[vout][aout]"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_video_path,
+            "-loop", "1",
+            "-i", image_path,
+            "-filter_complex", filter_complex,
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-movflags", "+faststart",
+            output_video_path
+        ]
+    else:
+        filter_complex = (
+            f"[1:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,trim=duration={duration:.2f},select=gte(n\\,0)[end_v];"
+            f"[0:v][end_v]concat=n=2:v=1:a=0[vout]"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_video_path,
+            "-loop", "1",
+            "-i", image_path,
+            "-filter_complex", filter_complex,
+            "-map", "[vout]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-movflags", "+faststart",
+            output_video_path
+        ]
+    run_command(cmd)
+
 def _get_hook_setting(suffix: str, clip_meta: dict, settings: dict, default: Any) -> Any:
     keys = [
         f"autoHook{suffix}",
@@ -1126,6 +1166,27 @@ def main():
         _prepend_meme(meme_path, meme_duration, str(final_clip_path), str(temp_meme_out), SHORTS_W, SHORTS_H)
         safe_unlink(final_clip_path)
         safe_rename(temp_meme_out, final_clip_path)
+
+    # 3.6 Append End Thumbnail if enabled
+    end_thumb = clip.get("endThumbnail") or clip_metadata.get("endThumbnail")
+    if end_thumb and isinstance(end_thumb, dict) and end_thumb.get("enabled"):
+        img_rel_path = end_thumb.get("imagePath")
+        if img_rel_path:
+            img_full_path = Path(img_rel_path)
+            if not img_full_path.is_absolute():
+                img_full_path = output_dir / img_rel_path
+            if img_full_path.exists():
+                print(json.dumps({"stage": "Appending End Thumbnail...", "progress": 90}))
+                sys.stdout.flush()
+                temp_end_out = temp_dir / f"{args.clip_id}_end_thumb.mp4"
+                try:
+                    _append_end_thumbnail(str(final_clip_path), str(img_full_path), str(temp_end_out), SHORTS_W, SHORTS_H, duration=0.5)
+                    safe_unlink(final_clip_path)
+                    safe_rename(temp_end_out, final_clip_path)
+                except Exception as _thumb_err:
+                    print(f"Warning: Appending end thumbnail failed: {_thumb_err}", file=sys.stderr)
+                    if temp_end_out.exists():
+                        safe_unlink(temp_end_out)
 
     # 4. Regenerate thumbnail image using OpenCV
     print(json.dumps({"stage": "Regenerating Thumbnail...", "progress": 95}))
