@@ -100,130 +100,124 @@ def run_clip_candidate_building(
         min_dur, max_dur = 15.0, 90.0
 
     candidates: list[HighlightCandidate] = []
+    cand_counter = 1
 
     for idx, seg in enumerate(segments):
-        cand_id = f"cand_{idx + 1:03d}"
         cand_blocks = [block_map[bid] for bid in seg.conversation_blocks if bid in block_map]
 
         if not cand_blocks:
-            # Fallback if block IDs missing
             start_t, end_t = seg.start, seg.end
         else:
             start_t = cand_blocks[0].start_time
             end_t = cand_blocks[-1].end_time
 
-        orig_start, orig_end = start_t, end_t
+        seg_dur = end_t - start_t
 
-        # Step A: Semantic Context Expansion
-        exp_start, exp_end, expansion_reason = _apply_semantic_context_expansion(
-            seg, cand_blocks, blocks, min_dur, max_dur, words
-        )
+        # If segment is already within max_dur (<= 90.0s), construct single candidate directly
+        if seg_dur <= max_dur:
+            cand_id = f"cand_{cand_counter:03d}"
+            cand_counter += 1
+            
+            orig_start, orig_end = start_t, end_t
+            exp_start, exp_end, expansion_reason = _apply_semantic_context_expansion(
+                seg, cand_blocks, blocks, min_dur, max_dur, words
+            )
 
-        # Step B: Word-Level Sentence Boundary Snapping
-        if words:
-            start_idx = tu.get_nearest_word_index(words, exp_start)
-            end_idx = tu.get_nearest_word_index(words, exp_end)
+            if words:
+                start_idx = tu.get_nearest_word_index(words, exp_start)
+                end_idx = tu.get_nearest_word_index(words, exp_end)
+                snapped_start_idx = tu.find_sentence_start(words, start_idx, max_lookback_sec=12.0)
+                snapped_end_idx = tu.find_sentence_end(words, end_idx, max_lookahead_sec=12.0)
+                final_start = float(words[snapped_start_idx]["start"])
+                final_end = float(words[snapped_end_idx]["end"])
+                start_word = str(words[snapped_start_idx].get("word", "")).strip()
+                end_word = str(words[snapped_end_idx].get("word", "")).strip()
+            else:
+                final_start, final_end = exp_start, exp_end
+                snapped_start_idx, snapped_end_idx = 0, 0
+                start_word, end_word = "", ""
 
-            snapped_start_idx = tu.find_sentence_start(words, start_idx, max_lookback_sec=12.0)
-            snapped_end_idx = tu.find_sentence_end(words, end_idx, max_lookahead_sec=12.0)
+            duration = max(0.1, final_end - final_start)
+            cand_text = tu.text_in_range(words, final_start, final_end) if words else seg.topic_title
 
-            final_start = float(words[snapped_start_idx]["start"])
-            final_end = float(words[snapped_end_idx]["end"])
-            start_word = str(words[snapped_start_idx].get("word", "")).strip()
-            end_word = str(words[snapped_end_idx].get("word", "")).strip()
-        else:
-            final_start, final_end = exp_start, exp_end
-            snapped_start_idx, snapped_end_idx = 0, 0
-            start_word, end_word = "", ""
+            conf_start, start_reasons = _compute_boundary_confidence_start(
+                final_start, snapped_start_idx, words, cand_text
+            )
+            conf_end, end_reasons = _compute_boundary_confidence_end(
+                final_end, snapped_end_idx, words, seg
+            )
+            overall_conf = round((conf_start * 0.45) + (conf_end * 0.55), 3)
+            needs_refine = (overall_conf < 0.70)
 
-        duration = max(0.1, final_end - final_start)
-        cand_text = tu.text_in_range(words, final_start, final_end) if words else seg.topic_title
+            wh_stats = tu.compute_whisper_confidence_region(words, final_start, final_end) if words else {}
+            wh_region = WhisperConfidenceRegion(
+                start_word_confidence=wh_stats.get("start_word_confidence", 1.0),
+                end_word_confidence=wh_stats.get("end_word_confidence", 1.0),
+                region_avg=wh_stats.get("region_avg", 1.0),
+                low_confidence_word_count=wh_stats.get("low_confidence_word_count", 0),
+                low_confidence_at_boundary=wh_stats.get("low_confidence_at_boundary", False),
+            )
 
-        # Step C: Independent Boundary Confidence Calculation
-        conf_start, start_reasons = _compute_boundary_confidence_start(
-            final_start, snapped_start_idx, words, cand_text
-        )
-        conf_end, end_reasons = _compute_boundary_confidence_end(
-            final_end, snapped_end_idx, words, seg
-        )
-        overall_conf = round((conf_start * 0.45) + (conf_end * 0.55), 3)
-
-        needs_refine = (overall_conf < 0.70)
-
-        # Whisper confidence region calculation
-        wh_stats = tu.compute_whisper_confidence_region(words, final_start, final_end) if words else {}
-        wh_region = WhisperConfidenceRegion(
-            start_word_confidence=wh_stats.get("start_word_confidence", 1.0),
-            end_word_confidence=wh_stats.get("end_word_confidence", 1.0),
-            region_avg=wh_stats.get("region_avg", 1.0),
-            low_confidence_word_count=wh_stats.get("low_confidence_word_count", 0),
-            low_confidence_at_boundary=wh_stats.get("low_confidence_at_boundary", False),
-        )
-
-        # Key moment timestamps
-        hook_t = final_start
-        payoff_t = final_end - 2.0 if duration > 4.0 else final_end
-        expl_start = final_start + 3.0 if duration > 6.0 else final_start
-        expl_end = final_end - 4.0 if duration > 8.0 else final_end
-
-        candidate = HighlightCandidate(
-            candidate_id=cand_id,
-            segment_id=seg.segment_id,
-            topic_id=seg.topic_id,
-            content_type=seg.content_type,
-            start=round(final_start, 3),
-            end=round(final_end, 3),
-            duration=round(duration, 3),
-            original_start=round(orig_start, 3),
-            original_end=round(orig_end, 3),
-            expanded_start=round(exp_start, 3),
-            expanded_end=round(exp_end, 3),
-            boundary_confidence_start=round(conf_start, 3),
-            boundary_confidence_end=round(conf_end, 3),
-            overall_boundary_confidence=overall_conf,
-            context_expansion_reason=expansion_reason,
-            hook_timestamp=round(hook_t, 3),
-            payoff_timestamp=round(payoff_t, 3),
-            explanation_start=round(expl_start, 3),
-            explanation_end=round(expl_end, 3),
-            semantic_completeness=seg.semantic_completeness,
-            editorial_completeness=seg.editorial_completeness,
-            standalone_score=seg.standalone_score,
-            estimated_retention=seg.estimated_viewer_retention,
-            viral_patterns=list(seg.viral_patterns_detected),
-            speakers=list(seg.speakers),
-            duplicate_fingerprint=seg.duplicate_fingerprint,
-            llm_reasoning=seg.llm_reasoning,
-            needs_refinement=needs_refine,
-            long_form=(duration > max_dur and duration <= max_dur * 1.3),
-            context_expanded=(exp_start < orig_start or exp_end > orig_end),
-            context_expansion_seconds=round((orig_start - exp_start) + (exp_end - orig_end), 3),
-            natural_start=(conf_start >= 0.70),
-            natural_end=(conf_end >= 0.70),
-            start_word=start_word,
-            end_word=end_word,
-            conversation_pattern=seg.conversation_pattern,
-            boundary_confidence=BoundaryConfidence(
-                start=conf_start, end=conf_end, overall=overall_conf
-            ),
-            whisper_confidence=wh_region,
-            memory_context={"topicTitle": seg.topic_title},
-            text=cand_text,
-            speaker_turn_ids=list(seg.conversation_blocks),
-            candidate_boundary_warning=needs_refine,
-            diagnostics={
-                "startChoiceReason": f"Snapped to sentence start ('{start_word}'): {', '.join(start_reasons)}",
-                "endChoiceReason": f"Snapped to sentence completion ('{end_word}'): {', '.join(end_reasons)}",
-                "contextExpansionReason": expansion_reason,
-                "confidenceBreakdown": {
-                    "start": round(conf_start, 3),
-                    "end": round(conf_end, 3),
-                    "overall": overall_conf,
-                    "needsRefinement": needs_refine,
+            candidate = HighlightCandidate(
+                candidate_id=cand_id,
+                segment_id=seg.segment_id,
+                topic_id=seg.topic_id,
+                content_type=seg.content_type,
+                start=round(final_start, 3),
+                end=round(final_end, 3),
+                duration=round(duration, 3),
+                original_start=round(orig_start, 3),
+                original_end=round(orig_end, 3),
+                expanded_start=round(exp_start, 3),
+                expanded_end=round(exp_end, 3),
+                boundary_confidence_start=round(conf_start, 3),
+                boundary_confidence_end=round(conf_end, 3),
+                overall_boundary_confidence=overall_conf,
+                context_expansion_reason=expansion_reason,
+                hook_timestamp=round(final_start, 3),
+                payoff_timestamp=round(final_end - 2.0 if duration > 4.0 else final_end, 3),
+                explanation_start=round(final_start + 3.0 if duration > 6.0 else final_start, 3),
+                explanation_end=round(final_end - 4.0 if duration > 8.0 else final_end, 3),
+                semantic_completeness=seg.semantic_completeness,
+                editorial_completeness=seg.editorial_completeness,
+                standalone_score=seg.standalone_score,
+                estimated_retention=seg.estimated_viewer_retention,
+                viral_patterns=list(seg.viral_patterns_detected),
+                speakers=list(seg.speakers),
+                duplicate_fingerprint=seg.duplicate_fingerprint,
+                llm_reasoning=seg.llm_reasoning,
+                needs_refinement=needs_refine,
+                long_form=False,
+                context_expanded=(exp_start < orig_start or exp_end > orig_end),
+                context_expansion_seconds=round((orig_start - exp_start) + (exp_end - orig_end), 3),
+                natural_start=(conf_start >= 0.70),
+                natural_end=(conf_end >= 0.70),
+                start_word=start_word,
+                end_word=end_word,
+                conversation_pattern=seg.conversation_pattern,
+                boundary_confidence=BoundaryConfidence(start=conf_start, end=conf_end, overall=overall_conf),
+                whisper_confidence=wh_region,
+                memory_context={"topicTitle": seg.topic_title},
+                text=cand_text,
+                speaker_turn_ids=list(seg.conversation_blocks),
+                candidate_boundary_warning=needs_refine,
+                diagnostics={
+                    "startChoiceReason": f"Snapped to sentence start ('{start_word}'): {', '.join(start_reasons)}",
+                    "endChoiceReason": f"Snapped to sentence completion ('{end_word}'): {', '.join(end_reasons)}",
+                    "contextExpansionReason": expansion_reason,
+                    "confidenceBreakdown": {"start": round(conf_start, 3), "end": round(conf_end, 3), "overall": overall_conf},
+                    "splitType": "direct_segment",
                 },
-            },
-        )
-        candidates.append(candidate)
+            )
+            candidates.append(candidate)
+
+        else:
+            # Segment > max_dur (oversized) — Apply Refined Editorial Peak & Completeness Extractor
+            sub_cands = _extract_editorial_peak_sub_candidates(
+                seg, cand_blocks, blocks, words, min_dur, max_dur, cand_counter
+            )
+            cand_counter += len(sub_cands)
+            candidates.extend(sub_cands)
 
     elapsed = time.perf_counter() - t_start
     logger.info("Pass 3 complete in %.2fs: constructed %d highlight candidates", elapsed, len(candidates))
@@ -475,3 +469,245 @@ def _write_highlight_candidates(
     out_path = temp_dir / "highlight_candidates.json"
     out_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
     logger.info("Written: %s", out_path)
+
+
+# ---------------------------------------------------------------------------
+# Refined Editorial Peak & Story Completeness Sub-Candidate Extractor
+# ---------------------------------------------------------------------------
+
+def _compute_story_completeness_score(
+    text: str,
+    first_block: ConversationBlock,
+    peak_block: ConversationBlock,
+    last_block: ConversationBlock,
+) -> tuple[float, dict[str, bool]]:
+    """
+    Compute Story Completeness Score (0.0 - 1.0) based on 4 essential narrative elements:
+    1. Hook (30%): Clean opening starter without floating pronouns.
+    2. Context (20%): Sufficient setup/background (>= 30 words, no connector opener).
+    3. Main Point / Conflict (30%): Scored editorial peak or key question/answer.
+    4. Payoff / Conclusion (20%): Sentence completion punctuation.
+    """
+    words = text.strip().split()
+    first_word = words[0] if words else ""
+    last_word = words[-1] if words else ""
+
+    has_hook = not tu.has_floating_pronoun(first_word)
+    has_context = len(words) >= 30 and not tu.word_is_connector({"word": first_word})
+    has_main_point = (
+        getattr(peak_block, "editorial_importance", 0.5) >= 0.55
+        or getattr(peak_block, "emotion_score", 0.0) >= 0.40
+        or peak_block.block_role in ("question", "hook", "story", "joke", "rebuttal")
+    )
+    has_payoff = last_word[-1:] in (".", "?", "!")
+
+    components = {
+        "hasHook": has_hook,
+        "hasContext": has_context,
+        "hasMainPoint": has_main_point,
+        "hasPayoff": has_payoff,
+    }
+
+    score = (0.30 if has_hook else 0.0) + (0.20 if has_context else 0.0) + (0.30 if has_main_point else 0.0) + (0.20 if has_payoff else 0.0)
+    return round(score, 2), components
+
+
+def _extract_editorial_peak_sub_candidates(
+    seg: EditorialSegment,
+    seg_blocks: list[ConversationBlock],
+    all_blocks: list[ConversationBlock],
+    words: list[dict],
+    min_dur: float,
+    max_dur: float,
+    start_cand_counter: int,
+) -> list[HighlightCandidate]:
+    """
+    Pass 3 Sub-Candidate Extractor for Oversized Segments (> 90.0s).
+    Uses Peak-First Generation, Multi-Peak Clustering, Story Completeness Scoring,
+    and IoU Overlap Suppression with full deterministic candidate accounting audit logging.
+    """
+    if not seg_blocks or not words:
+        return []
+
+    # Step 1: Detect and Score all internal Editorial Peaks
+    raw_peaks: list[dict[str, Any]] = []
+    for b in seg_blocks:
+        role = b.block_role
+        imp = getattr(b, "editorial_importance", 0.5)
+        em = getattr(b, "emotion_score", 0.0)
+        signals = getattr(b, "pattern_signals", [])
+
+        peak_score = round((imp * 0.4) + (em * 0.3) + (0.3 if role in ("question", "hook", "story", "joke", "rebuttal") else 0.0), 2)
+        if peak_score >= 0.50 or len(signals) > 0:
+            raw_peaks.append({"block": b, "score": peak_score})
+
+    peaks_found = len(raw_peaks)
+    surviving_peaks = [p for p in raw_peaks if p["score"] >= 0.55]
+    peaks_removed = peaks_found - len(surviving_peaks)
+
+    # Step 2: Multi-Peak Clustering (cluster peaks within 25.0s into 1 story arc)
+    clusters: list[dict[str, Any]] = []
+    for p in surviving_peaks:
+        p_time = float(p["block"].start_time)
+        matched_cluster = None
+        for cl in clusters:
+            if abs(p_time - cl["center_time"]) <= 25.0:
+                matched_cluster = cl
+                break
+        if matched_cluster:
+            matched_cluster["peaks"].append(p)
+            matched_cluster["center_time"] = sum(float(x["block"].start_time) for x in matched_cluster["peaks"]) / len(matched_cluster["peaks"])
+        else:
+            clusters.append({"center_time": p_time, "peaks": [p]})
+
+    clusters_created = len(clusters)
+
+    # Step 3: Expand Clusters into Story-Complete Candidate Windows
+    candidates_expanded = 0
+    candidates_passing_pre_qa = 0
+    emitted_candidate_data: list[dict[str, Any]] = []
+
+    for cl in clusters:
+        best_peak = max(cl["peaks"], key=lambda x: x["score"])["block"]
+        p_start = float(best_peak.start_time)
+
+        # Snap start to clean sentence boundary
+        start_word_idx = tu.get_nearest_word_index(words, max(seg.start, p_start - 18.0))
+        snapped_start_idx = tu.find_sentence_start(words, start_word_idx, max_lookback_sec=10.0)
+        sub_start = float(words[snapped_start_idx]["start"])
+
+        # Snap end to clean sentence completion (target 25s - 55s duration)
+        target_end = sub_start + 40.0
+        end_word_idx = tu.get_nearest_word_index(words, min(seg.end, target_end))
+        snapped_end_idx = tu.find_sentence_end(words, end_word_idx, max_lookahead_sec=10.0)
+        sub_end = float(words[snapped_end_idx]["end"])
+
+        sub_dur = sub_end - sub_start
+        candidates_expanded += 1
+
+        if 20.0 <= sub_dur <= 60.0:
+            sub_text = tu.text_in_range(words, sub_start, sub_end).strip()
+            completeness_score, components = _compute_story_completeness_score(
+                sub_text, seg_blocks[0], best_peak, seg_blocks[-1]
+            )
+
+            if completeness_score >= 0.70:
+                candidates_passing_pre_qa += 1
+                emitted_candidate_data.append({
+                    "start": round(sub_start, 3),
+                    "end": round(sub_end, 3),
+                    "duration": round(sub_dur, 3),
+                    "snappedStartIdx": snapped_start_idx,
+                    "snappedEndIdx": snapped_end_idx,
+                    "storyCompletenessScore": completeness_score,
+                    "completenessComponents": components,
+                    "text": sub_text,
+                    "peakBlock": best_peak,
+                })
+
+    # Step 4: IoU Overlap Suppression (IoU <= 0.35)
+    final_emitted_data: list[dict[str, Any]] = []
+    for ec in sorted(emitted_candidate_data, key=lambda x: x["storyCompletenessScore"], reverse=True):
+        overlap = False
+        for fe in final_emitted_data:
+            intersection = max(0.0, min(ec["end"], fe["end"]) - max(ec["start"], fe["start"]))
+            union = max(ec["end"], fe["end"]) - min(ec["start"], fe["start"])
+            iou = intersection / max(union, 0.1)
+            if iou > 0.35:
+                overlap = True
+                break
+        if not overlap:
+            final_emitted_data.append(ec)
+
+    # Step 5: Log Deterministic Accounting Audit
+    logger.info(
+        "Segment %s Audit: Duration=%.1fs | PeaksFound=%d | PeaksRemoved=%d | Clusters=%d | Expanded=%d | PassedPreQA=%d | Emitted=%d",
+        seg.segment_id, seg.duration, peaks_found, peaks_removed, clusters_created, candidates_expanded, candidates_passing_pre_qa, len(final_emitted_data)
+    )
+
+    # Step 6: Instantiate HighlightCandidate objects
+    sub_candidates: list[HighlightCandidate] = []
+    for idx, ed in enumerate(final_emitted_data):
+        cand_id = f"cand_{start_cand_counter + idx:03d}"
+        sub_start = ed["start"]
+        sub_end = ed["end"]
+        sub_dur = ed["duration"]
+        cand_text = ed["text"]
+        snapped_start_idx = ed["snappedStartIdx"]
+        snapped_end_idx = ed["snappedEndIdx"]
+
+        start_word = str(words[snapped_start_idx].get("word", "")).strip()
+        end_word = str(words[snapped_end_idx].get("word", "")).strip()
+
+        conf_start, start_reasons = _compute_boundary_confidence_start(
+            sub_start, snapped_start_idx, words, cand_text
+        )
+        conf_end, end_reasons = _compute_boundary_confidence_end(
+            sub_end, snapped_end_idx, words, seg
+        )
+        overall_conf = round((conf_start * 0.45) + (conf_end * 0.55), 3)
+        needs_refine = (overall_conf < 0.70)
+
+        wh_stats = tu.compute_whisper_confidence_region(words, sub_start, sub_end)
+        wh_region = WhisperConfidenceRegion(
+            start_word_confidence=wh_stats.get("start_word_confidence", 1.0),
+            end_word_confidence=wh_stats.get("end_word_confidence", 1.0),
+            region_avg=wh_stats.get("region_avg", 1.0),
+            low_confidence_word_count=wh_stats.get("low_confidence_word_count", 0),
+            low_confidence_at_boundary=wh_stats.get("low_confidence_at_boundary", False),
+        )
+
+        cand = HighlightCandidate(
+            candidate_id=cand_id,
+            segment_id=seg.segment_id,
+            topic_id=seg.topic_id,
+            content_type=seg.content_type,
+            start=round(sub_start, 3),
+            end=round(sub_end, 3),
+            duration=round(sub_dur, 3),
+            original_start=round(seg.start, 3),
+            original_end=round(seg.end, 3),
+            expanded_start=round(sub_start, 3),
+            expanded_end=round(sub_end, 3),
+            boundary_confidence_start=round(conf_start, 3),
+            boundary_confidence_end=round(conf_end, 3),
+            overall_boundary_confidence=overall_conf,
+            context_expansion_reason="Extracted via Editorial Peak & Story Completeness Splitter",
+            hook_timestamp=round(sub_start, 3),
+            payoff_timestamp=round(sub_end - 2.0 if sub_dur > 4.0 else sub_end, 3),
+            explanation_start=round(sub_start + 3.0 if sub_dur > 6.0 else sub_start, 3),
+            explanation_end=round(sub_end - 4.0 if sub_dur > 8.0 else sub_end, 3),
+            semantic_completeness=ed["storyCompletenessScore"],
+            editorial_completeness=ed["storyCompletenessScore"],
+            standalone_score=4,
+            estimated_retention=seg.estimated_viewer_retention,
+            viral_patterns=list(seg.viral_patterns_detected),
+            speakers=list(seg.speakers),
+            duplicate_fingerprint=seg.duplicate_fingerprint,
+            llm_reasoning=seg.llm_reasoning,
+            needs_refinement=needs_refine,
+            long_form=False,
+            context_expanded=True,
+            context_expansion_seconds=round(seg.duration - sub_dur, 3),
+            natural_start=(conf_start >= 0.70),
+            natural_end=(conf_end >= 0.70),
+            start_word=start_word,
+            end_word=end_word,
+            conversation_pattern=seg.conversation_pattern,
+            boundary_confidence=BoundaryConfidence(start=conf_start, end=conf_end, overall=overall_conf),
+            whisper_confidence=wh_region,
+            memory_context={"topicTitle": seg.topic_title},
+            text=cand_text,
+            speaker_turn_ids=list(seg.conversation_blocks),
+            candidate_boundary_warning=needs_refine,
+            diagnostics={
+                "startChoiceReason": f"Snapped to sentence start ('{start_word}'): {', '.join(start_reasons)}",
+                "endChoiceReason": f"Snapped to sentence completion ('{end_word}'): {', '.join(end_reasons)}",
+                "storyCompletenessScore": ed["storyCompletenessScore"],
+                "storyComponents": ed["completenessComponents"],
+                "splitType": "editorial_peak_extractor",
+            },
+        )
+        sub_candidates.append(cand)
+
+    return sub_candidates
