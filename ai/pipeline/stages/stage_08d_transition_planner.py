@@ -200,6 +200,7 @@ def _apply_hermite_transition(frames, event_time, duration, src_w, src_h):
         cw, ch = _crop_dims(src_w, src_h, new_f["zoom"])
         new_f["width"] = cw
         new_f["height"] = ch
+        new_f["interp"] = "HERMITE"
         frames[i] = new_f
 
 
@@ -235,6 +236,11 @@ def run(context):
         if not frames:
             continue
 
+        # Ensure every keyframe defaults to interp="HOLD" if missing
+        for f in frames:
+            if "interp" not in f:
+                f["interp"] = "HERMITE" if f.get("fsm_state") == "INTENTIONAL_REFRAME" else "HOLD"
+
         # Layout segments from crop_coords
         plan = layout_map.get(clip_id, {})
         layout_segments = plan.get("layoutSegments", [])
@@ -251,18 +257,30 @@ def run(context):
                     clip_cuts.add(round(t, 4))
         clip_cuts = sorted(clip_cuts)
 
+        # Insert keyframe at exact scene-cut timestamps
+        for cut_t in clip_cuts:
+            if not any(abs(float(f["time"]) - cut_t) < 0.001 for f in frames):
+                # Find adjacent keyframe right after cut_t
+                after_f = next((f for f in frames if float(f["time"]) >= cut_t), frames[-1])
+                cut_f = dict(after_f)
+                cut_f["time"] = cut_t
+                cut_f["interp"] = "HOLD"
+                frames.append(cut_f)
+
+        # Keep frames sorted chronologically
+        frames.sort(key=lambda f: float(f["time"]))
+        clip["frames"] = frames
+
         events = _identify_events(clip_start, frames, layout_segments, clip_cuts)
-        if not events:
-            continue
+        if events:
+            for event in events:
+                _apply_hermite_transition(frames, event["time"], event["duration"], src_w, src_h)
 
-        for event in events:
-            _apply_hermite_transition(frames, event["time"], event["duration"], src_w, src_h)
-
-        total_events += len(events)
-        event_summary = ", ".join(
-            f"{e['type']}@{e['time']:.2f}s" for e in events
-        )
-        print(f"  {clip_id}: {len(events)} transitions — {event_summary}", flush=True)
+            total_events += len(events)
+            event_summary = ", ".join(
+                f"{e['type']}@{e['time']:.2f}s" for e in events
+            )
+            print(f"  {clip_id}: {len(events)} transitions — {event_summary}", flush=True)
 
     print(f"stage_08d: {total_events} transition windows applied.", flush=True)
     curve_path.write_text(json.dumps(camera_curve, indent=2), encoding="utf-8")
