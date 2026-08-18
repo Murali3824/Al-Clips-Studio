@@ -150,6 +150,8 @@ def generate_production_metadata(clip_data: dict, settings: dict = None) -> dict
 
     metadata = {
         "title": title[:60],
+        "hookText": hook,
+        "userHookText": None,
         "hook": hook,
         "autoHookText": hook,
         "description": description,
@@ -214,6 +216,6 @@ def generate_with_quality_review(clip_data: dict, settings: dict = None) -> dict
     selected["productionScore"] = breakdown.get("accuracy")
     selected["seoScore"] = breakdown.get("seo")
     selected["viralScore"] = breakdown.get("viralPotential")
-    selected["score"] = selected.get("qualityScore")
+    selected["metadataQualityScore"] = selected.get("qualityScore")
 
     return selected
