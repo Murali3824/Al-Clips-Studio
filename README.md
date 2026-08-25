@@ -30,8 +30,8 @@ An offline, AI-powered desktop web app that detects highlights, tracks faces, re
 | 🖼️ **Thumbnail Generation** | Auto-generated cover thumbnails for every clip |
 | 📷 **End Thumbnail** | Upload a custom 9:16 image appended to the clip for YouTube Shorts thumbnails |
 | 🎵 **Background Music** | Optional background music from a built-in library |
-| 🌐 **Translation** | Translate captions and metadata into multiple languages |
-| ✂️ **Manual Editing** | Trim, re-render, edit metadata, and fine-tune every clip |
+| 🌐 **Translation** | Translate captions and metadata into multiple languages — Coming Soon |
+| ✂️ **Manual Editing** | re-render, edit metadata, and fine-tune every clip |
 | 📡 **Real-Time Progress** | Socket.IO live progress updates for every pipeline stage |
 
 ---
