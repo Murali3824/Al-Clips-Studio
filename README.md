@@ -353,14 +353,4 @@ Choose from **10+ caption formats** during generation:
 
 ---
 
-## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
-
----
-
-<div align="center">
-
-**Built with ❤️ using React, Express, Python, FFmpeg, and local AI models.**
-
-</div>
