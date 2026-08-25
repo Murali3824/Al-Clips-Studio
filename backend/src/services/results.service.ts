@@ -119,6 +119,12 @@ export function readResults(jobId: string) {
 
     const effectiveHook = metadata.userHookText || metadata.autoHookText || metadata.hookText || metadata.hook || "";
 
+    delete metadata.suggestedPostingTime;
+    delete metadata.mood;
+    delete metadata.topics;
+    delete metadata.keyTopics;
+    delete metadata.emotion;
+
     let endThumbnail = clip.endThumbnail ?? null;
     if (endThumbnail && typeof endThumbnail === "object" && endThumbnail.imagePath) {
       const filename = path.basename(endThumbnail.imagePath);
