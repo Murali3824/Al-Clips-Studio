@@ -700,8 +700,8 @@ export const EditorLayout: React.FC<EditorLayoutProps> = ({
                   <div className="space-y-1.5">
                     <label className="field-label">Hook Text</label>
                     <textarea
-                      value={ec.autoHookText ?? ec.hook ?? ""}
-                      onChange={(e) => setEdit("autoHookText", e.target.value)}
+                      value={ec.userHookText ?? ec.autoHookText ?? ec.hookText ?? ec.hook ?? ""}
+                      onChange={(e) => setEdit("userHookText", e.target.value)}
                       rows={2}
                       placeholder="AI-generated hook text for this clip"
                       className="input-field resize-none"
@@ -1006,10 +1006,7 @@ export const EditorLayout: React.FC<EditorLayoutProps> = ({
                 className="w-full justify-start"
                 onClick={() => {
                   if (!activeJobId || !selectedClip.id) return;
-                  window.open(
-                    `http://localhost:3001/api/results/${activeJobId}/thumbnails/${selectedClip.id}?t=${Date.now()}`,
-                    "_blank"
-                  );
+                  window.location.href = `http://localhost:3001/api/results/${activeJobId}/thumbnails/${selectedClip.id}/download`;
                 }}
               >
                 Download Cover Thumbnail
