@@ -19,7 +19,7 @@ export const ClipCard: React.FC<ClipCardProps> = ({
   onSelect,
   onToggleExport,
 }) => {
-  const score = Math.round(clip.score ?? 90);
+  const score = Math.round(clip.viralScore ?? clip.score ?? 80);
 
   const getScoreBadgeClass = (s: number) => {
     if (s >= 85) return "bg-emerald-50 text-emerald-700 border-emerald-200";
