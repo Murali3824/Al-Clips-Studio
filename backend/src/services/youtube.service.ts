@@ -213,6 +213,11 @@ function translateError(stderr: string, activeBrowser?: string | null): { userMe
 
 /**
  * Builds arguments array for yt-dlp execution.
+ *
+ * Cookie priority:
+ *   1. cookies.txt file in storage/ → unlocks 1080p / 2K / 4K DASH streams (best quality)
+ *   2. Browser cookies (--cookies-from-browser) → HD DASH streams if browser is accessible
+ *   3. No cookies + android,web client → only 360p progressive stream (fallback)
  */
 function buildYtDlpArgs(extraArgs: string[], url: string, activeBrowser?: string | null): string[] {
   const args = ["-m", "yt_dlp"];
@@ -220,11 +225,35 @@ function buildYtDlpArgs(extraArgs: string[], url: string, activeBrowser?: string
   // Add JS runtimes ('node' is valid for yt-dlp)
   args.push("--js-runtimes", "node");
 
-  // Add browser cookies if specified or detected
-  const browser = activeBrowser !== undefined ? activeBrowser : getAccessibleBrowser();
-  if (browser) {
-    args.push("--cookies-from-browser", browser);
+  // YouTube requires a JS challenge solver; fetch it from yt-dlp's GitHub
+  args.push("--remote-components", "ejs:github");
+
+  // Resilience: retry on transient CDN errors
+  args.push("--retries", "10");
+  args.push("--fragment-retries", "10");
+
+  // ── Cookie Authentication (Priority Order) ──────────────────────────────
+  const cookiesFilePath = path.join(storageRoot, "cookies.txt");
+  const hasCookiesFile = fs.existsSync(cookiesFilePath);
+
+  if (hasCookiesFile) {
+    // Priority 1: cookies.txt — provides full HD/4K DASH stream access
+    args.push("--cookies", cookiesFilePath);
+    console.log("[YouTube] Using cookies.txt for authentication → HD quality enabled");
+  } else {
+    // Priority 2: browser cookies (may be locked/inaccessible on Windows)
+    const browser = activeBrowser !== undefined ? activeBrowser : getAccessibleBrowser();
+    if (browser) {
+      args.push("--cookies-from-browser", browser);
+      console.log(`[YouTube] Using browser cookies (${browser}) for authentication`);
+    } else {
+      // Priority 3: No cookies — force android,web client to get at least 360p
+      // (default android_vr client returns HD URLs but CDN 403s them without auth)
+      args.push("--extractor-args", "youtube:player_client=android,web");
+      console.log("[YouTube] No cookies available → falling back to 360p (add storage/cookies.txt for HD)");
+    }
   }
+  // ────────────────────────────────────────────────────────────────────────
 
   args.push(...extraArgs);
   args.push(url);
