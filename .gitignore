@@ -7,9 +7,14 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+models/
+
 storage/uploads/*
 storage/outputs/*
 storage/temp/*
+
 !storage/uploads/.gitkeep
 !storage/outputs/.gitkeep
 !storage/temp/.gitkeep
+!models/.gitkeep
