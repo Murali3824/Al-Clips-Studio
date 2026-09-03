@@ -1,6 +1,6 @@
 {
   "clipGenerationMode": "auto",
-  "coverageMode": "best",
+  "coverageMode": "entire",
   "preferredDuration": "auto",
   "clipCount": 20,
   "minClipDuration": 20,
@@ -9,7 +9,7 @@
   "speakerDiarization": true,
   "backgroundMusic": true,
   "musicVolume": 7,
-  "thumbnailGeneration": true,
+  "thumbnailGeneration": false,
   "silenceRemoval": true,
   "translationLanguages": [
     "hi"
