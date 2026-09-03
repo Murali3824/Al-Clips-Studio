@@ -253,7 +253,82 @@ The web UI opens at `http://localhost:5173`.
 
 ---
 
+## 📺 YouTube URL Download — Quality Guide
+
+You can paste a YouTube URL directly into the upload field instead of uploading a local video file. The app will automatically download and process it.
+
+### ⚡ Default Behavior (No Setup Required)
+
+> **Without any extra setup, YouTube URLs download at 360p quality.**
+
+This happens because YouTube now requires authenticated browser sessions to serve HD video streams. Without cookies, YouTube only provides a low-resolution stream that does not require login.
+
+**360p is still fully functional** — the AI pipeline will generate clips, captions, and thumbnails normally. You only need HD setup if video quality matters to your output.
+
+---
+
+### 🎯 How to Enable HD Downloads (1080p / 2K / 4K)
+
+To download YouTube videos at full quality, you need to export your browser cookies and place them in the project's storage folder. This gives the downloader your authenticated YouTube session.
+
+#### Step 1 — Install the Browser Extension
+
+Open **Google Chrome** and install the extension:
+
+> 🔗 **[Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)** — Chrome Web Store
+
+#### Step 2 — Export Your YouTube Cookies
+
+1. Make sure you are **logged in to YouTube** in Chrome
+2. Go to **[https://www.youtube.com](https://www.youtube.com)**
+3. Click the **Get cookies.txt LOCALLY** extension icon in the toolbar
+4. Click **Export** (or "Export as cookies.txt")
+5. A file named `cookies.txt` will be downloaded to your computer
+
+#### Step 3 — Place the File in the Storage Folder
+
+Move the exported `cookies.txt` file into the `storage/` folder inside your project directory.
+
+```
+your-project-folder/
+└── storage/
+    └── cookies.txt      ← place the file here
+```
+
+> ⚠️ The file must be named exactly **`cookies.txt`** (all lowercase, with the `.txt` extension).
+> Do not rename it to anything else.
+
+#### Step 4 — Restart the Backend
+
+```bash
+# Stop the backend if it is running (Ctrl+C), then restart:
+cd backend
+npm run dev
+```
+
+Once the backend starts, you will see this message in the console when a YouTube URL is processed:
+
+```
+[YouTube] Using cookies.txt for authentication → HD quality enabled
+```
+
+This confirms HD quality is active. The app will now download at the **best available quality** (1080p, 2K, or 4K depending on what the video offers).
+
+---
+
+### 🔄 Quality Comparison
+
+| Setup | Download Quality | Works Without Login? |
+|---|---|---|
+| No cookies.txt | 360p only | ✅ Yes |
+| With cookies.txt | 1080p / 2K / 4K | ✅ Yes (uses your session) |
+
+> 💡 **Tip:** YouTube cookies expire after some time (usually weeks or months). If HD downloads stop working later, simply repeat Steps 2–3 to export a fresh `cookies.txt`.
+
+---
+
 ## 📁 Project Structure
+
 
 ```
 ai-clips-studio/
